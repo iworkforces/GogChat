@@ -665,7 +665,7 @@ describe('PlatformUtils', () => {
       const { openNewGitHubIssue } = await import('./platformHelpers');
 
       openNewGitHubIssue({
-        repoUrl: 'https://github.com/iWorkforces/GogChat',
+        repoUrl: 'https://github.com/iworkforces/GogChat',
         title: 'Test Issue',
         body: 'Issue description',
         labels: ['bug'],
@@ -679,7 +679,7 @@ describe('PlatformUtils', () => {
       const { openNewGitHubIssue } = await import('./platformHelpers');
 
       openNewGitHubIssue({
-        repoUrl: 'https://github.com/iWorkforces/GogChat',
+        repoUrl: 'https://github.com/iworkforces/GogChat',
       });
 
       const { shell } = await import('electron');
@@ -782,7 +782,7 @@ describe('PlatformUtils', () => {
       // Should not throw — error is caught internally
       expect(() =>
         openNewGitHubIssue({
-          repoUrl: 'https://github.com/iWorkforces/GogChat',
+          repoUrl: 'https://github.com/iworkforces/GogChat',
           title: 'Test',
         })
       ).not.toThrow();
@@ -807,7 +807,7 @@ describe('PlatformUtils', () => {
       (shell.openExternal as ReturnType<typeof vi.fn>).mockClear();
 
       openNewGitHubIssue({
-        repoUrl: 'https://github.com/iWorkforces/GogChat',
+        repoUrl: 'https://github.com/iworkforces/GogChat',
         title: 'Bug Report',
         body: 'Steps to reproduce',
         labels: ['bug', 'critical'],
@@ -827,7 +827,7 @@ describe('PlatformUtils', () => {
       (validateExternalURL as ReturnType<typeof vi.fn>).mockImplementation((url: string) => url);
 
       openNewGitHubIssue({
-        repoUrl: 'https://github.com/iWorkforces/GogChat',
+        repoUrl: 'https://github.com/iworkforces/GogChat',
       });
 
       const calls = (validateExternalURL as ReturnType<typeof vi.fn>).mock.calls;
@@ -845,7 +845,7 @@ describe('PlatformUtils', () => {
       (validateExternalURL as ReturnType<typeof vi.fn>).mockImplementation((url: string) => url);
 
       openNewGitHubIssue({
-        repoUrl: 'https://github.com/iWorkforces/GogChat',
+        repoUrl: 'https://github.com/iworkforces/GogChat',
         labels: [],
       });
 

@@ -51,9 +51,9 @@ export function getPackageInfo(): Readonly<PackageInfo> {
         productName: 'GogChat',
         version: '1.0.0',
         description: 'GogChat',
-        repository: 'https://github.com/iWorkforces/GogChat',
-        homepage: 'https://github.com/iWorkforces/GogChat',
-        author: 'iWorkforces Engineers',
+        repository: 'https://github.com/iworkforces/GogChat',
+        homepage: 'https://github.com/iworkforces/GogChat',
+        author: 'iworkforces Engineers',
       };
     }
   }

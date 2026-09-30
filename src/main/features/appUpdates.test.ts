@@ -42,7 +42,7 @@ vi.mock('../config.js', () => ({
 
 vi.mock('../utils/platform/packageInfo.js', () => ({
   getPackageInfo: vi.fn().mockReturnValue({
-    repository: 'https://github.com/iWorkforces/GogChat',
+    repository: 'https://github.com/iworkforces/GogChat',
     productName: 'GogChat',
   }),
 }));
@@ -82,7 +82,7 @@ import { getPackageInfo } from '../utils/platform/packageInfo.js';
 const STABLE_V9 = {
   tag_name: 'v9.0.0',
   body: 'Release notes',
-  html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+  html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
   draft: false,
   prerelease: false,
 } as const;
@@ -90,7 +90,7 @@ const STABLE_V9 = {
 const STABLE_CURRENT = {
   tag_name: 'v3.0.0',
   body: '',
-  html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v3.0.0',
+  html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v3.0.0',
   draft: false,
   prerelease: false,
 } as const;
@@ -134,18 +134,18 @@ function hungFetch(init: RequestInit | undefined): Promise<Response> {
 
 describe('appUpdates helpers', () => {
   it('githubRepoSlug parses HTTPS and bare owner/repo', () => {
-    expect(githubRepoSlug('https://github.com/iWorkforces/GogChat')).toBe('iWorkforces/GogChat');
-    expect(githubRepoSlug('https://github.com/iWorkforces/GogChat.git')).toBe(
-      'iWorkforces/GogChat'
+    expect(githubRepoSlug('https://github.com/iworkforces/GogChat')).toBe('iworkforces/GogChat');
+    expect(githubRepoSlug('https://github.com/iworkforces/GogChat.git')).toBe(
+      'iworkforces/GogChat'
     );
-    expect(githubRepoSlug('iWorkforces/GogChat')).toBe('iWorkforces/GogChat');
+    expect(githubRepoSlug('iworkforces/GogChat')).toBe('iworkforces/GogChat');
     expect(githubRepoSlug('https://example.com/not-github')).toBeNull();
     expect(githubRepoSlug('')).toBeNull();
     expect(githubRepoSlug('   ')).toBeNull();
-    expect(githubRepoSlug('https://www.github.com/iWorkforces/GogChat')).toBe(
-      'iWorkforces/GogChat'
+    expect(githubRepoSlug('https://www.github.com/iworkforces/GogChat')).toBe(
+      'iworkforces/GogChat'
     );
-    expect(githubRepoSlug('github.com/iWorkforces/GogChat')).toBe('iWorkforces/GogChat');
+    expect(githubRepoSlug('github.com/iworkforces/GogChat')).toBe('iworkforces/GogChat');
     expect(githubRepoSlug('https://github.com/only-owner')).toBeNull();
     expect(githubRepoSlug('http://[')).toBeNull();
   });
@@ -201,7 +201,7 @@ describe('stable GitHub release parser', () => {
 
     expect(parse(STABLE_V9)).toEqual({
       tag_name: 'v9.0.0',
-      html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+      html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
       body: 'Release notes',
     });
     expect(parse({ ...STABLE_V9, draft: true })).toBeNull();
@@ -211,7 +211,7 @@ describe('stable GitHub release parser', () => {
     expect(
       parse({
         ...STABLE_V9,
-        html_url: 'http://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+        html_url: 'http://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
       })
     ).toBeNull();
     expect(parse({ ...STABLE_V9, tag_name: '' })).toBeNull();
@@ -236,7 +236,7 @@ describe('stable GitHub release parser', () => {
     expect(
       parse({
         ...STABLE_V9,
-        html_url: 'https://github.com/iWorkforces/GogChat/issues/1',
+        html_url: 'https://github.com/iworkforces/GogChat/issues/1',
       })
     ).toBeNull();
     expect(parse({ ...STABLE_V9, body: 12 })).toEqual({
@@ -261,7 +261,7 @@ describe('stable GitHub release parser', () => {
         { tag_name: 'nope' },
         {
           ...STABLE_V9,
-          html_url: 'http://github.com/iWorkforces/GogChat/releases/tag/v8.0.0',
+          html_url: 'http://github.com/iworkforces/GogChat/releases/tag/v8.0.0',
           tag_name: 'v8.0.0',
         },
         STABLE_V9,
@@ -269,7 +269,7 @@ describe('stable GitHub release parser', () => {
       ])
     ).toEqual({
       tag_name: 'v9.0.0',
-      html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+      html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
       body: 'Release notes',
     });
   });
@@ -320,7 +320,7 @@ describe('checkForUpdatesManual', () => {
 
     await checkForUpdatesManual();
     expect(openExternal).toHaveBeenCalledWith(
-      'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0'
+      'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0'
     );
   });
 
@@ -390,7 +390,7 @@ describe('checkForUpdatesManual', () => {
       [
         {
           tag_name: 'v9.0.0',
-          html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+          html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
           draft: true,
           prerelease: false,
         },
@@ -398,7 +398,7 @@ describe('checkForUpdatesManual', () => {
       [
         {
           tag_name: 'v9.0.0',
-          html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0',
+          html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
           draft: false,
           prerelease: true,
         },
@@ -438,18 +438,18 @@ describe('checkForUpdatesManual', () => {
             ...STABLE_V9,
             draft: true,
             tag_name: 'v10.0.0-draft',
-            html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v10.0.0-draft',
+            html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v10.0.0-draft',
           },
           {
             ...STABLE_V9,
             prerelease: true,
             tag_name: 'v10.0.0-rc.1',
-            html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v10.0.0-rc.1',
+            html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v10.0.0-rc.1',
           },
           {
             ...STABLE_V9,
             tag_name: 'v8.0.0',
-            html_url: 'http://github.com/iWorkforces/GogChat/releases/tag/v8.0.0',
+            html_url: 'http://github.com/iworkforces/GogChat/releases/tag/v8.0.0',
           },
           STABLE_V9,
         ],
@@ -459,7 +459,7 @@ describe('checkForUpdatesManual', () => {
     await checkForUpdatesManual();
     expect(openExternal).toHaveBeenCalledTimes(1);
     expect(openExternal).toHaveBeenCalledWith(
-      'https://github.com/iWorkforces/GogChat/releases/tag/v9.0.0'
+      'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0'
     );
   });
 

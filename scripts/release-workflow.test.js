@@ -256,10 +256,6 @@ const QUALIFY_COMMANDS = [
   'node --require ./tests/polyfill-crypto.cjs ./node_modules/vitest/vitest.mjs run --coverage',
   'bunx madge --circular --extensions ts src/',
   'bun scripts/build-rsbuild.js',
-  'bunx playwright test --project=e2e',
-  'bunx playwright test --project=integration',
-  'bunx playwright test --project=performance',
-  'bunx playwright test --project=preload-artifact',
   'node scripts/headless-startup.js',
   'node scripts/check-perf-budget.js performance-metrics.json',
 ];
@@ -305,6 +301,10 @@ export function simulateReleaseDag(failedJob) {
 }
 
 describe('release qualify-then-tag DAG', () => {
+  it('leaves Playwright execution to the independent workflow', () => {
+    expect(readReleaseWorkflow()).not.toMatch(/playwright/i);
+  });
+
   it('qualifies the exact source SHA before any package job', () => {
     const workflow = readReleaseWorkflow();
     const qualifyJob = workflowJob(workflow, 'qualify-release');

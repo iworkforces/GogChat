@@ -21,7 +21,7 @@ const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
 const APP_PATH = path.join(PROJECT_ROOT, 'lib/main/index.js');
 const FEATURE_CHUNK = path.join(PROJECT_ROOT, 'lib/chunks/appUpdates.js');
 
-const STABLE_URL = 'https://github.com/iWorkforces/GogChat/releases/tag/v99.0.0';
+const STABLE_URL = 'https://github.com/iworkforces/GogChat/releases/tag/v99.0.0';
 
 type FixtureKind =
   'stable' | 'draft-only' | 'prerelease-only' | 'malformed' | 'empty' | 'http-error' | 'timeout';
@@ -123,13 +123,13 @@ async function probeManualUpdate(
           body: [
             {
               tag_name: 'v98.0.0-draft',
-              html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v98.0.0-draft',
+              html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v98.0.0-draft',
               draft: true,
               prerelease: false,
             },
             {
               tag_name: 'v98.0.0-rc.1',
-              html_url: 'https://github.com/iWorkforces/GogChat/releases/tag/v98.0.0-rc.1',
+              html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v98.0.0-rc.1',
               draft: false,
               prerelease: true,
             },

@@ -120,7 +120,7 @@ After enrollment is approved:
 
 3. Fill in the form:
    - **User Email Address:** Your Apple ID email
-   - **Common Name:** Something descriptive like `iWorkforces Developer ID`
+   - **Common Name:** Something descriptive like `iworkforces Developer ID`
    - **CA Email Address:** Leave empty
    - **Request is:** Select **"Saved to disk"**
 
