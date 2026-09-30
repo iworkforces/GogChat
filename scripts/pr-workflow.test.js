@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -6,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
 const PR_WORKFLOW_PATH = path.join(PROJECT_ROOT, '.github/workflows/pr-check.yml');
-const PLAYWRIGHT_PROJECTS = ['e2e', 'integration', 'performance', 'preload-artifact'];
 
 const LITERAL = {
   install: 'bun install --frozen-lockfile',
@@ -64,10 +62,6 @@ describe('PR check workflow contract', () => {
       LITERAL.coverage,
       LITERAL.madge,
       LITERAL.build,
-      'bunx playwright test --project=e2e',
-      'bunx playwright test --project=integration',
-      'bunx playwright test --project=performance',
-      'bunx playwright test --project=preload-artifact',
       LITERAL.headless,
       LITERAL.budget,
     ];
@@ -109,84 +103,12 @@ describe('PR check workflow contract', () => {
     expect(job).toContain('performance-metrics.json');
     expect(job).toContain('.perf-history.json');
     expect(job).toContain('coverage-output.txt');
-    expect(job).toContain('playwright-e2e.log');
-    expect(job).toContain('playwright-integration.log');
-    expect(job).toContain('playwright-performance.log');
   });
 
-  it('tees Playwright e2e output and annotates the last failure excerpt', () => {
-    const job = workflowJob(readPrWorkflow(), 'check');
-    const e2eAt = indexOfCommand(job, 'bunx playwright test --project=e2e');
-    expect(job).toContain('set -o pipefail');
-    expect(job).toContain('tee playwright-e2e.log');
-    expect(job).toContain('PIPESTATUS');
-    expect(job).toContain('::error file=tests/e2e/user-workflows.test.ts::');
-    expect(e2eAt).toBeLessThan(job.indexOf('::error file=tests/e2e/user-workflows.test.ts::'));
-  });
+  it('leaves Playwright commands and artifacts to the independent workflow', () => {
+    const workflow = readPrWorkflow();
 
-  it('tees Playwright integration output and annotates the last failure excerpt', () => {
-    const job = workflowJob(readPrWorkflow(), 'check');
-    const integrationAt = indexOfCommand(job, 'bunx playwright test --project=integration');
-    expect(job).toContain('tee playwright-integration.log');
-    expect(job).toContain('::error file=tests/integration/app-launch.test.ts::');
-    expect(integrationAt).toBeLessThan(
-      job.indexOf('::error file=tests/integration/app-launch.test.ts::')
-    );
-  });
-
-  it('tees Playwright performance output and annotates the last failure excerpt', () => {
-    const job = workflowJob(readPrWorkflow(), 'check');
-    const perfAt = indexOfCommand(job, 'bunx playwright test --project=performance');
-    expect(job).toContain('tee playwright-performance.log');
-    expect(job).toContain('::error file=tests/performance/performance-regression.test.ts::');
-    expect(perfAt).toBeLessThan(
-      job.indexOf('::error file=tests/performance/performance-regression.test.ts::')
-    );
-  });
-
-  it('uploads Playwright traces and reports when a Playwright step fails', () => {
-    const job = workflowJob(readPrWorkflow(), 'check');
-    const e2eAt = indexOfCommand(job, 'bunx playwright test --project=e2e');
-    const preloadAt = indexOfCommand(job, 'bunx playwright test --project=preload-artifact');
-    const failureUploadAt = job.indexOf('if: failure()');
-    const headlessAt = indexOfCommand(job, LITERAL.headless);
-
-    expect(failureUploadAt).toBeGreaterThan(e2eAt);
-    expect(failureUploadAt).toBeGreaterThan(preloadAt);
-    expect(failureUploadAt).toBeLessThan(headlessAt);
-    expect(job).toContain('test-results/');
-    expect(job).toContain('playwright-report/');
-    expect(job).toContain('retention-days: 7');
-  });
-
-  it('lists every Playwright project once and no extra project names', () => {
-    const output = execFileSync('bunx', ['playwright', 'test', '--list'], {
-      cwd: PROJECT_ROOT,
-      encoding: 'utf-8',
-    });
-
-    for (const project of PLAYWRIGHT_PROJECTS) {
-      expect(output).toContain(`[${project}]`);
-    }
-
-    const entries = [...output.matchAll(/\[([^\]]+)\] › ([^\n]+)/g)].map((match) => ({
-      project: match[1],
-      rest: match[2],
-    }));
-    const uniqueProjects = [...new Set(entries.map((entry) => entry.project))].sort();
-    expect(uniqueProjects).toEqual([...PLAYWRIGHT_PROJECTS].sort());
-    expect(entries.length).toBeGreaterThan(uniqueProjects.length);
-
-    const owner = new Map();
-    for (const entry of entries) {
-      const file = entry.rest.split(':')[0] ?? entry.rest;
-      const previous = owner.get(file);
-      if (previous && previous !== entry.project) {
-        throw new Error(
-          `duplicate project ownership for ${file}: ${previous} and ${entry.project}`
-        );
-      }
-      owner.set(file, entry.project);
-    }
+    expect(workflow).not.toMatch(/playwright/i);
+    expect(workflow).not.toContain('test-results/');
   });
 });
