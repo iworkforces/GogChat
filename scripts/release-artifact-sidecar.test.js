@@ -1,13 +1,15 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   RELEASE_ARTIFACT_SIDECAR_SCHEMA_VERSION,
   buildReleaseArtifactSidecar,
   compareReleaseArtifactSidecar,
+  collectReleaseArtifactSidecarEvidence,
   inspectReleaseArtifactFile,
   parseReleaseArtifactSidecar,
   serializeReleaseArtifactSidecar,
@@ -37,7 +39,43 @@ describe('release-artifact-sidecar', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('binds binary size and both digests to the bytes read during validation', () => {
+    const basename = 'GogChat-3.21.4-arm64.dmg';
+    const binaryPath = path.join(tmpRoot, basename);
+    const digest = crypto.createHash('sha256').update('payload').digest('hex');
+    const raw = serializeReleaseArtifactSidecar(validSidecar({ sha256: digest }));
+    fs.writeFileSync(binaryPath, 'payload');
+    fs.writeFileSync(`${binaryPath}.json`, raw);
+    const read = fs.readFileSync;
+    vi.spyOn(fs, 'readFileSync').mockImplementation((filePath, ...args) => {
+      const bytes = read(filePath, ...args);
+      if (filePath === binaryPath) fs.writeFileSync(binaryPath, 'changed payload');
+      if (filePath === `${binaryPath}.json`) fs.appendFileSync(filePath, ' ');
+      return bytes;
+    });
+
+    const evidence = collectReleaseArtifactSidecarEvidence({
+      inputDir: tmpRoot,
+      artifacts: [{ relativePath: basename, arch: 'arm64', platform: 'macos' }],
+      expectedSourceSha: SOURCE_SHA,
+      expectedPackageVersion: '3.21.4',
+    });
+
+    expect(evidence).toEqual({
+      violations: [],
+      pairs: [{ binaryRelativePath: basename, sidecarRelativePath: `${basename}.json` }],
+      files: [
+        { relativePath: basename, sha256: digest },
+        {
+          relativePath: `${basename}.json`,
+          sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+        },
+      ],
+    });
   });
 
   it('builds a deterministic sidecar from the producer file and release identity', () => {
