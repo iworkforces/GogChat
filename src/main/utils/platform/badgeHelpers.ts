@@ -16,7 +16,7 @@
  */
 
 import { app } from 'electron';
-import type { BrowserWindow, Tray } from 'electron';
+import type { BrowserWindow, IpcMainEvent, Tray, WebContents } from 'electron';
 import log from 'electron-log';
 import {
   FAVICON_PATTERNS,
@@ -50,6 +50,10 @@ import {
 import { resolveNotificationFocusWindow } from './notificationFocus.js';
 import { getAccountWindowManager } from '../account/accountWindowManager.js';
 import { ensureNotificationPermission } from '../security/notificationAccess.js';
+import {
+  onAccountRemoved,
+  onAccountWebContentsCreated,
+} from '../account/accountWebContentsHooks.js';
 
 /**
  * Decide app icon based on favicon URL.
@@ -101,10 +105,14 @@ export const updateBadgeIcon = (_window: BrowserWindow, count: number): void => 
 export interface BadgeHandlerCleanups {
   faviconCleanup: () => void;
   unreadCleanup: () => void;
+  webContentsCleanup: () => void;
+  accountRemovedCleanup: () => void;
+  sessionCleanup: () => void;
 }
 
-function accountUnreadKey(accountIndex: AccountIndex | null): string {
-  return accountIndex === null ? 'unknown' : String(accountIndex);
+interface AccountBadgeState {
+  faviconHref?: string;
+  unreadCount?: number;
 }
 
 /**
@@ -112,62 +120,94 @@ function accountUnreadKey(accountIndex: AccountIndex | null): string {
  * Returns cleanup callbacks for each.
  */
 export function setupBadgeHandlers(window: BrowserWindow, trayIcon: Tray): BadgeHandlerCleanups {
-  // Track current tray icon type to avoid redundant updates
   let currentTrayIconType: IconType = ICON_TYPES.OFFLINE;
+  let active = true;
+  const stateByAccount = new Map<AccountIndex, AccountBadgeState>();
+  const currentSenders = new Map<AccountIndex, WebContents>();
+  const webContentsCleanup = onAccountWebContentsCreated(({ accountIndex, webContents }) => {
+    if (!active) return;
+    currentSenders.set(accountIndex, webContents);
+    return () => {
+      if (currentSenders.get(accountIndex) === webContents) {
+        currentSenders.delete(accountIndex);
+      }
+    };
+  });
 
-  // ⚡ FAST PATH: sync ipcMain.on handler (no Promise allocation per call).
-  let lastFaviconHref: string | undefined;
+  const resolveLiveAccount = (event: IpcMainEvent): AccountIndex | null => {
+    if (!active || event.sender.isDestroyed()) return null;
+    const accountIndex = resolveAccountIndexFromIpcEvent(event);
+    if (accountIndex === null || currentSenders.get(accountIndex) !== event.sender) return null;
+    return accountIndex;
+  };
+
+  const renderPresentation = (): void => {
+    let totalRaw = 0;
+    let unread = false;
+    let normal = false;
+    for (const state of stateByAccount.values()) {
+      const faviconType =
+        state.faviconHref === undefined ? undefined : decideIcon(state.faviconHref);
+      totalRaw += state.unreadCount ?? 0;
+      unread ||=
+        state.unreadCount === undefined ? faviconType === ICON_TYPES.BADGE : state.unreadCount > 0;
+      normal ||=
+        faviconType === undefined
+          ? state.unreadCount !== undefined
+          : faviconType !== ICON_TYPES.OFFLINE;
+    }
+    updateBadgeIcon(window, totalRaw);
+    if (platform.config.useTemplateTrayIcon) {
+      setTrayUnread(unread);
+    } else {
+      const type = unread ? ICON_TYPES.BADGE : normal ? ICON_TYPES.NORMAL : ICON_TYPES.OFFLINE;
+      if (type !== currentTrayIconType) {
+        currentTrayIconType = type;
+        trayIcon.setImage(getIconCache().getIcon(`resources/icons/${type}/16.png`));
+        log.debug(`[BadgeIcon] Tray icon updated to type: ${type}`);
+      }
+    }
+  };
+
+  const accountRemovedCleanup = onAccountRemoved((accountIndex) => {
+    if (!active) return;
+    currentSenders.delete(accountIndex);
+    if (stateByAccount.delete(accountIndex)) {
+      renderPresentation();
+    }
+  });
+
   const faviconCleanup = registerFastHandler<string>({
     channel: IPC_CHANNELS.FAVICON_CHANGED,
     rateLimit: RATE_LIMITS.IPC_FAVICON,
     validator: validateFaviconURL,
-    handler: (validatedHref, _event) => {
-      if (validatedHref === lastFaviconHref) return;
-      lastFaviconHref = validatedHref;
-
-      const type = decideIcon(validatedHref);
-
-      if (platform.config.useTemplateTrayIcon) {
-        setTrayUnread(type === ICON_TYPES.BADGE);
-      } else {
-        if (type !== currentTrayIconType) {
-          currentTrayIconType = type;
-          const icon = getIconCache().getIcon(`resources/icons/${type}/16.png`);
-          trayIcon.setImage(icon);
-          log.debug(`[BadgeIcon] Tray icon updated to type: ${type}`);
-        } else {
-          log.debug(`[BadgeIcon] Tray icon type unchanged (${type}), skipping update`);
-        }
-      }
+    handler: (validatedHref, event) => {
+      const accountIndex = resolveLiveAccount(event);
+      if (accountIndex === null) return;
+      const state = stateByAccount.get(accountIndex) ?? {};
+      if (validatedHref === state.faviconHref) return;
+      state.faviconHref = validatedHref;
+      stateByAccount.set(accountIndex, state);
+      renderPresentation();
     },
   });
-
-  // Per-account last unread counts (key = account index string or "unknown")
-  const lastUnreadByAccount = new Map<string, number>();
 
   const unreadCleanup = registerFastHandler<number>({
     channel: IPC_CHANNELS.UNREAD_COUNT,
     rateLimit: RATE_LIMITS.IPC_UNREAD_COUNT,
     validator: validateUnreadCount,
     handler: (validatedCount, event) => {
-      const accountIndex = resolveAccountIndexFromIpcEvent(event);
-      const key = accountUnreadKey(accountIndex);
-      const previousCount = lastUnreadByAccount.get(key);
+      const accountIndex = resolveLiveAccount(event);
+      if (accountIndex === null) return;
+      const state = stateByAccount.get(accountIndex) ?? {};
+      const previousCount = state.unreadCount;
 
       if (previousCount === validatedCount) {
         return;
       }
-      lastUnreadByAccount.set(key, validatedCount);
-
-      const totalRaw = [...lastUnreadByAccount.values()].reduce((a, b) => a + b, 0);
-      const totalDisplay = clampBadgeDisplayCount(totalRaw);
-
-      updateBadgeIcon(window, totalRaw);
-      setTrayUnread(totalRaw > 0);
-
-      log.debug(
-        `[BadgeIcon] Unread account=${key} count=${validatedCount} total=${totalRaw} display=${totalDisplay}`
-      );
+      state.unreadCount = validatedCount;
+      stateByAccount.set(accountIndex, state);
+      renderPresentation();
 
       try {
         const focusWindow = resolveNotificationFocusWindow(event, window);
@@ -176,15 +216,11 @@ export function setupBadgeHandlers(window: BrowserWindow, trayIcon: Tray): Badge
         // have a focused host while another account is frontmost).
         let accountUiFocused = false;
         try {
-          if (accountIndex !== null) {
-            const manager = getAccountWindowManager();
-            accountUiFocused =
-              !focusWindow.isDestroyed() &&
-              focusWindow.isFocused() === true &&
-              manager.isAccountVisible(accountIndex) === true;
-          } else {
-            accountUiFocused = !focusWindow.isDestroyed() && focusWindow.isFocused() === true;
-          }
+          const manager = getAccountWindowManager();
+          accountUiFocused =
+            !focusWindow.isDestroyed() &&
+            focusWindow.isFocused() === true &&
+            manager.isAccountVisible(accountIndex) === true;
         } catch {
           accountUiFocused = !focusWindow.isDestroyed() && focusWindow.isFocused() === true;
         }
@@ -217,5 +253,16 @@ export function setupBadgeHandlers(window: BrowserWindow, trayIcon: Tray): Badge
     },
   });
 
-  return { faviconCleanup, unreadCleanup };
+  const sessionCleanup = (): void => {
+    active = false;
+    stateByAccount.clear();
+    currentSenders.clear();
+  };
+  return {
+    faviconCleanup,
+    unreadCleanup,
+    webContentsCleanup,
+    accountRemovedCleanup,
+    sessionCleanup,
+  };
 }

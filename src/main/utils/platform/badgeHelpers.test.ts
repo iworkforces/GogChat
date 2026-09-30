@@ -14,6 +14,10 @@
 
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import type { IpcMainEvent } from 'electron';
+import { asType } from '../../../shared/typeUtils.js';
+import { asAccountIndex } from '../../../shared/types/branded.js';
+import type { AccountIndex } from '../../../shared/types/branded.js';
+import type { IAccountWindowManager } from '../../../shared/types/window.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -146,12 +150,57 @@ function fakeTray() {
   return { setImage: vi.fn() } as unknown as Electron.Tray;
 }
 
+const liveWebContents = new Map<AccountIndex, Electron.WebContents>();
+function eventForAccount(accountIndex = 0): IpcMainEvent {
+  const sender = liveWebContents.get(asAccountIndex(accountIndex));
+  if (!sender) throw new Error(`Missing test sender for account ${accountIndex}`);
+  return asType<IpcMainEvent>({ sender });
+}
+
+async function backfillLiveAccounts(): Promise<void> {
+  const hooks = await import('../account/accountWebContentsHooks.js');
+  hooks.clearAccountWebContentsHooksForTests();
+  liveWebContents.clear();
+  for (const index of [0, 1, 2, 7]) {
+    liveWebContents.set(
+      asAccountIndex(index),
+      asType<Electron.WebContents>({
+        id: index + 1,
+        isDestroyed: vi.fn(() => false),
+      })
+    );
+  }
+  hooks.setAccountWebContentsHooksManager(
+    asType<IAccountWindowManager>({
+      enumerateAccountWebContents: () =>
+        [...liveWebContents].map(([accountIndex, webContents]) => ({
+          accountIndex,
+          webContents,
+          backend: 'browser-window',
+        })),
+    })
+  );
+  mockResolveAccount.mockImplementation((event: IpcMainEvent) => {
+    for (const [accountIndex, webContents] of liveWebContents) {
+      if (event.sender === webContents) return accountIndex;
+    }
+    return null;
+  });
+}
+
 // ─── Config-shape tests (mocked registerFastHandler) ─────────────────────────
 
 describe('badgeHelpers (config wiring)', () => {
   const mockRegisterFastHandler = vi.fn().mockReturnValue(vi.fn());
 
-  beforeEach(() => {
+  function capturedHandler<T>(channel: string): (value: T, event: IpcMainEvent) => void {
+    const config = asType<{ handler: (value: T, event: IpcMainEvent) => void }>(
+      mockRegisterFastHandler.mock.calls.find(([candidate]) => candidate.channel === channel)?.[0]
+    );
+    return config.handler;
+  }
+
+  beforeEach(async () => {
     vi.resetModules();
     vi.doMock('../ipc/ipcFastPath.js', () => ({
       registerFastHandler: (cfg: unknown) => mockRegisterFastHandler(cfg),
@@ -159,14 +208,15 @@ describe('badgeHelpers (config wiring)', () => {
     mockRegisterFastHandler.mockClear();
     mockRegisterFastHandler.mockReturnValue(vi.fn());
     mockSetBadgeCount.mockClear();
-    mockGetIcon.mockReturnValue('/fake/icon.png');
+    mockGetIcon.mockClear().mockReturnValue('/fake/icon.png');
     mockSetTrayUnread.mockClear();
     mockShowNativeNotification.mockClear();
     mockWasBridgeRecently.mockClear();
     mockWasBridgeRecently.mockReturnValue(false);
     mockEnsureNotificationPermission.mockClear();
     mockResolveFocusWindow.mockImplementation((_e: unknown, fb: unknown) => fb);
-    mockResolveAccount.mockReturnValue(0);
+    await backfillLiveAccounts();
+    mockIsAccountVisible.mockReturnValue(true);
     mockBuildPayload.mockClear();
     mockConfigGet.mockReturnValue(false);
     mockPlatformState.supportsDockBadge = true;
@@ -256,12 +306,21 @@ describe('badgeHelpers (config wiring)', () => {
 
       const faviconCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string) => void };
+      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
 
       mockSetTrayUnread.mockClear();
-      faviconCfg.handler('https://mail.google.com/favicon_chat_new_notif_r2.ico');
-      faviconCfg.handler('https://mail.google.com/favicon_chat_new_notif_r2.ico');
-      faviconCfg.handler('https://mail.google.com/favicon_chat_new_notif_r2.ico');
+      faviconCfg.handler(
+        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
+        eventForAccount()
+      );
+      faviconCfg.handler(
+        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
+        eventForAccount()
+      );
+      faviconCfg.handler(
+        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
+        eventForAccount()
+      );
 
       // setTrayUnread runs inside the handler body — should be called once
       expect(mockSetTrayUnread).toHaveBeenCalledTimes(1);
@@ -273,11 +332,11 @@ describe('badgeHelpers (config wiring)', () => {
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
-      )?.[0] as { handler: (v: number) => void };
+      )?.[0] as { handler: (v: number, event: IpcMainEvent) => void };
 
-      unreadCfg.handler(7);
-      unreadCfg.handler(7);
-      unreadCfg.handler(7);
+      unreadCfg.handler(7, eventForAccount());
+      unreadCfg.handler(7, eventForAccount());
+      unreadCfg.handler(7, eventForAccount());
 
       expect(mockSetBadgeCount).toHaveBeenCalledTimes(1);
       expect(mockSetBadgeCount).toHaveBeenCalledWith(7);
@@ -289,8 +348,8 @@ describe('badgeHelpers (config wiring)', () => {
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
-      )?.[0] as { handler: (v: number) => void };
-      unreadCfg.handler(5);
+      )?.[0] as { handler: (v: number, event: IpcMainEvent) => void };
+      unreadCfg.handler(5, eventForAccount());
 
       expect(mockSetBadgeCount).toHaveBeenCalledWith(5);
       expect(mockSetTrayUnread).toHaveBeenCalledWith(true);
@@ -302,10 +361,45 @@ describe('badgeHelpers (config wiring)', () => {
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
-      )?.[0] as { handler: (v: number) => void };
-      unreadCfg.handler(0);
+      )?.[0] as { handler: (v: number, event: IpcMainEvent) => void };
+      unreadCfg.handler(0, eventForAccount());
 
       expect(mockSetTrayUnread).toHaveBeenCalledWith(false);
+    });
+
+    it('retains an unknown-count badge favicon when another live account reports normal', async () => {
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const first = asType<Electron.WebContents>({ id: 101, isDestroyed: () => false });
+      const second = asType<Electron.WebContents>({ id: 102, isDestroyed: () => false });
+      mockResolveAccount.mockImplementation((event: IpcMainEvent) =>
+        event.sender === first ? asAccountIndex(0) : asAccountIndex(2)
+      );
+      hooks.setAccountWebContentsHooksManager(
+        asType<IAccountWindowManager>({
+          enumerateAccountWebContents: () => [
+            { accountIndex: asAccountIndex(0), webContents: first, backend: 'browser-window' },
+            { accountIndex: asAccountIndex(2), webContents: second, backend: 'browser-window' },
+          ],
+        })
+      );
+      const cleanups = setupBadgeHandlers(fakeWindow(), fakeTray());
+      const config = asType<{ handler: (value: string, event: IpcMainEvent) => void }>(
+        mockRegisterFastHandler.mock.calls.find(([cfg]) => cfg.channel === 'faviconChanged')?.[0]
+      );
+
+      config.handler(
+        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
+        asType<IpcMainEvent>({ sender: first })
+      );
+      config.handler(
+        'https://mail.google.com/favicon_chat_r2.ico',
+        asType<IpcMainEvent>({ sender: second })
+      );
+
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+      for (const cleanup of Object.values(cleanups)) cleanup();
+      hooks.clearAccountWebContentsHooksForTests();
     });
 
     it('does not show unread-delta notification when flag is off', async () => {
@@ -316,7 +410,7 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      const event = { sender: { id: 1 } };
+      const event = eventForAccount();
       unreadCfg.handler(1, event);
       unreadCfg.handler(2, event);
 
@@ -331,8 +425,8 @@ describe('badgeHelpers (config wiring)', () => {
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
       mockSetBadgeCount.mockClear();
-      unreadCfg.handler(5, {});
-      unreadCfg.handler(5, {});
+      unreadCfg.handler(5, eventForAccount());
+      unreadCfg.handler(5, eventForAccount());
       expect(mockSetBadgeCount).toHaveBeenCalledTimes(1);
     });
 
@@ -343,9 +437,12 @@ describe('badgeHelpers (config wiring)', () => {
       setupBadgeHandlers(fakeWindow(), tray);
       const faviconCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico');
-      faviconCfg.handler('https://mail.google.com/favicon_chat_new_notif_r2.ico');
+      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
+      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
+      faviconCfg.handler(
+        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
+        eventForAccount()
+      );
       expect(tray.setImage).toHaveBeenCalled();
       mockPlatformState.useTemplateTrayIcon = true;
     });
@@ -359,7 +456,7 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      const event = { sender: { id: 9 } };
+      const event = eventForAccount();
       unreadCfg.handler(1, event);
       expect(mockShowNativeNotification).not.toHaveBeenCalled(); // first observation
 
@@ -397,8 +494,8 @@ describe('badgeHelpers (config wiring)', () => {
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
 
-      unreadCfg.handler(40, { sender: { id: 1 } });
-      unreadCfg.handler(70, { sender: { id: 2 } });
+      unreadCfg.handler(40, eventForAccount());
+      unreadCfg.handler(70, eventForAccount(1));
 
       // sum 110 → display 99
       expect(mockSetBadgeCount).toHaveBeenLastCalledWith(99);
@@ -424,8 +521,8 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      unreadCfg.handler(1, {});
-      unreadCfg.handler(2, {});
+      unreadCfg.handler(1, eventForAccount());
+      unreadCfg.handler(2, eventForAccount());
 
       expect(mockShowNativeNotification).not.toHaveBeenCalled();
     });
@@ -440,7 +537,7 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      const event = { sender: { id: 11 } };
+      const event = eventForAccount(1);
       unreadCfg.handler(1, event);
       unreadCfg.handler(3, event);
 
@@ -459,8 +556,8 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      unreadCfg.handler(1, {});
-      unreadCfg.handler(2, {});
+      unreadCfg.handler(1, eventForAccount());
+      unreadCfg.handler(2, eventForAccount());
 
       expect(mockShowNativeNotification).not.toHaveBeenCalled();
     });
@@ -476,8 +573,8 @@ describe('badgeHelpers (config wiring)', () => {
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
       expect(() => {
-        unreadCfg.handler(1, {});
-        unreadCfg.handler(2, {});
+        unreadCfg.handler(1, eventForAccount());
+        unreadCfg.handler(2, eventForAccount());
       }).not.toThrow();
       mockShowNativeNotification.mockReturnValue(true);
     });
@@ -489,12 +586,12 @@ describe('badgeHelpers (config wiring)', () => {
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
-      unreadCfg.handler(2, {});
-      unreadCfg.handler(0, {});
+      unreadCfg.handler(2, eventForAccount());
+      unreadCfg.handler(0, eventForAccount());
       expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
     });
 
-    it('handles unknown account key and focused skip for unread-delta', async () => {
+    it('rejects an unmapped account without badge or unread-delta effects', async () => {
       mockResolveAccount.mockReturnValue(null);
       mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
@@ -503,9 +600,11 @@ describe('badgeHelpers (config wiring)', () => {
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
       mockShowNativeNotification.mockClear();
-      unreadCfg.handler(1, {});
-      unreadCfg.handler(4, {});
+      unreadCfg.handler(1, eventForAccount());
+      unreadCfg.handler(4, eventForAccount());
       expect(mockShowNativeNotification).not.toHaveBeenCalled();
+      expect(mockSetBadgeCount).not.toHaveBeenCalled();
+      expect(mockSetTrayUnread).not.toHaveBeenCalled();
     });
 
     it('skips redundant setImage when tray type unchanged on non-template icons', async () => {
@@ -515,12 +614,15 @@ describe('badgeHelpers (config wiring)', () => {
       setupBadgeHandlers(fakeWindow(), tray);
       const faviconCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico');
-      tray.setImage.mockClear();
-      faviconCfg.handler('https://mail.google.com/favicon_chat_new_non_notif_r2.png');
-      // same NORMAL type → may still match NORMAL pattern; second same type skip
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico');
+      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
+      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
+      vi.mocked(tray.setImage).mockClear();
+      faviconCfg.handler(
+        'https://mail.google.com/favicon_chat_r2.ico?revision=2',
+        eventForAccount()
+      );
+      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
+      expect(tray.setImage).not.toHaveBeenCalled();
       mockPlatformState.useTemplateTrayIcon = true;
     });
 
@@ -533,12 +635,173 @@ describe('badgeHelpers (config wiring)', () => {
 
       const faviconCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico');
+      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
+      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
 
       expect(mockSetTrayUnread).not.toHaveBeenCalled();
       expect(mockGetIcon).toHaveBeenCalledWith(expect.stringMatching(/^resources\/icons\//));
       expect(tray.setImage).toHaveBeenCalledWith('/fake/icon.png');
+    });
+
+    it.each([true, false])(
+      'uses aggregate count precedence with template tray = %s',
+      async (template) => {
+        mockPlatformState.useTemplateTrayIcon = template;
+        const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+        const tray = fakeTray();
+        setupBadgeHandlers(fakeWindow(), tray);
+        const favicon = capturedHandler<string>('faviconChanged');
+        const unread = capturedHandler<number>('unreadCount');
+        const badge = 'https://mail.google.com/favicon_chat_new_notif_r2.ico';
+        const normal = 'https://mail.google.com/favicon_chat_r2.ico';
+
+        favicon(badge, eventForAccount());
+        unread(0, eventForAccount());
+        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
+        else expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
+        favicon(badge, eventForAccount(2));
+        favicon(normal, eventForAccount());
+        unread(0, eventForAccount());
+        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+        else expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/badge/16.png');
+        unread(7, eventForAccount(2));
+        unread(0, eventForAccount(2));
+
+        expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
+        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
+        else {
+          expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
+          expect(mockSetTrayUnread).not.toHaveBeenCalled();
+          expect(tray.setImage).toHaveBeenLastCalledWith('/fake/icon.png');
+        }
+      }
+    );
+
+    it('deduplicates equal counts per account rather than across interleaved senders', async () => {
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow(), fakeTray());
+      const unread = capturedHandler<number>('unreadCount');
+
+      unread(60, eventForAccount());
+      unread(60, eventForAccount(2));
+      unread(60, eventForAccount());
+      unread(0, eventForAccount(2));
+
+      expect(mockSetBadgeCount.mock.calls).toEqual([[60], [99], [60]]);
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+    });
+
+    it('preserves cached counts across renderer destruction until permanent removal', async () => {
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow(), fakeTray());
+      const unread = capturedHandler<number>('unreadCount');
+      unread(5, eventForAccount());
+      unread(7, eventForAccount(2));
+
+      hooks.notifyAccountWebContentsDestroyed(asAccountIndex(2));
+      unread(0, eventForAccount());
+      unread(0, eventForAccount(2));
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(7);
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+      hooks.notifyAccountRemoved(asAccountIndex(2));
+
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
+    });
+
+    it('accepts the replacement before the old disposer and rejects stale or destroyed identities', async () => {
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow(), fakeTray());
+      const unread = capturedHandler<number>('unreadCount');
+      const oldEvent = eventForAccount(2);
+      unread(7, oldEvent);
+      const replacement = asType<Electron.WebContents>({
+        id: oldEvent.sender.id,
+        isDestroyed: () => false,
+      });
+      liveWebContents.set(asAccountIndex(2), replacement);
+      mockResolveAccount.mockReturnValue(asAccountIndex(2));
+      hooks.notifyAccountWebContentsCreated({
+        accountIndex: asAccountIndex(2),
+        webContents: replacement,
+        backend: 'browser-window',
+      });
+
+      unread(9, eventForAccount(2));
+      unread(0, oldEvent);
+      unread(0, asType<IpcMainEvent>({ sender: { id: replacement.id, isDestroyed: () => false } }));
+      vi.spyOn(replacement, 'isDestroyed').mockReturnValue(true);
+      unread(0, eventForAccount(2));
+
+      expect(mockSetBadgeCount.mock.calls).toEqual([[7], [9]]);
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+    });
+
+    it('discards count and favicon caches on removal so recreation starts with unknown count', async () => {
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow(), fakeTray());
+      const favicon = capturedHandler<string>('faviconChanged');
+      const unread = capturedHandler<number>('unreadCount');
+      const badge = 'https://mail.google.com/favicon_chat_new_notif_r2.ico';
+      favicon(badge, eventForAccount(2));
+      unread(0, eventForAccount(2));
+      hooks.notifyAccountRemoved(asAccountIndex(2));
+      liveWebContents.set(
+        asAccountIndex(2),
+        asType<Electron.WebContents>({ id: 103, isDestroyed: () => false })
+      );
+      hooks.notifyAccountWebContentsCreated({
+        accountIndex: asAccountIndex(2),
+        webContents: eventForAccount(2).sender,
+        backend: 'browser-window',
+      });
+
+      favicon(badge, eventForAccount(2));
+
+      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
+    });
+
+    it('uses normal and offline typed-image fallbacks from all remaining accounts', async () => {
+      mockPlatformState.useTemplateTrayIcon = false;
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow(), fakeTray());
+      const favicon = capturedHandler<string>('faviconChanged');
+      favicon('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
+      favicon('https://example.com/offline.ico', eventForAccount(2));
+      expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
+
+      hooks.notifyAccountRemoved(asAccountIndex(0));
+
+      expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/offline/16.png');
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
+    });
+
+    it('invalidates captured IPC and hook callbacks when the session is cleaned', async () => {
+      const hooks = await import('../account/accountWebContentsHooks.js');
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      const cleanups = setupBadgeHandlers(fakeWindow(), fakeTray());
+      const unread = capturedHandler<number>('unreadCount');
+      unread(8, eventForAccount(2));
+
+      cleanups.sessionCleanup();
+      cleanups.sessionCleanup();
+      mockSetBadgeCount.mockClear();
+      mockSetTrayUnread.mockClear();
+      hooks.notifyAccountWebContentsCreated({
+        accountIndex: asAccountIndex(2),
+        webContents: eventForAccount(2).sender,
+        backend: 'browser-window',
+      });
+      unread(12, eventForAccount(2));
+      hooks.notifyAccountRemoved(asAccountIndex(2));
+
+      expect(mockSetBadgeCount).not.toHaveBeenCalled();
+      expect(mockSetTrayUnread).not.toHaveBeenCalled();
     });
   });
 });
@@ -555,6 +818,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     mockConfigGet.mockReturnValue(false);
     mockPlatformState.supportsDockBadge = true;
     mockPlatformState.useTemplateTrayIcon = true;
+    await backfillLiveAccounts();
     const { getRateLimiter } = await import('../ipc/rateLimiter.js');
     getRateLimiter().resetAll();
   });
@@ -572,7 +836,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     expect(unreadCall).toBeDefined();
     const unreadHandler = unreadCall![1] as (e: IpcMainEvent, d: unknown) => void;
 
-    const event = {} as IpcMainEvent;
+    const event = eventForAccount();
     unreadHandler(event, 3);
     unreadHandler(event, 3);
     await new Promise((r) => setImmediate(r));
@@ -591,7 +855,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     const unreadCall = onMock.mock.calls.find(([ch]) => ch === 'unreadCount');
     const unreadHandler = unreadCall![1] as (e: IpcMainEvent, d: unknown) => void;
 
-    const event = {} as IpcMainEvent;
+    const event = eventForAccount();
     // Different payloads → different dedup keys → both should execute.
     unreadHandler(event, 1);
     unreadHandler(event, 2);
@@ -615,7 +879,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     expect(faviconCall).toBeDefined();
     const faviconHandler = faviconCall![1] as (e: IpcMainEvent, d: unknown) => void;
 
-    const event = {} as IpcMainEvent;
+    const event = eventForAccount();
     faviconHandler(event, 'https://example.com/x.ico');
     faviconHandler(event, 'https://example.com/x.ico');
     await new Promise((r) => setImmediate(r));
