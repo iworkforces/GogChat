@@ -69,7 +69,7 @@ describe('featureRunner platform gating', () => {
     const runner = await loadRunnerWithPlan({ ...emptyPlan(), deferred: [[unsupported]] });
 
     await expect(runner.runPhase('deferred', {})).resolves.toBeUndefined();
-    await runner.cleanupAll({});
+    await runner.cleanupAll({}, new AbortController().signal);
 
     expect(init).not.toHaveBeenCalled();
     expect(cleanup).not.toHaveBeenCalled();
