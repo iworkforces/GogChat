@@ -298,6 +298,8 @@ import {
 } from './accountWindowManager';
 import { asAccountIndex, asWebContentsId, toPartition } from '../../../shared/types/branded';
 import type { WindowFactory } from '../../../shared/types/window';
+import { asType } from '../../../shared/typeUtils.js';
+import * as accountHooks from './accountWebContentsHooks.js';
 import { startSessionMaintenance, stopSessionMaintenance } from './accountSessionMaintenance.js';
 import { getAccountViewManager, resetAccountViewManagerSingleton } from './accountViewManager.js';
 import {
@@ -1404,4 +1406,111 @@ runSharedRoutingScenarios({
       getHostWebContents: () => null,
     };
   },
+});
+
+describe('AccountWindowManager permanent removal hooks', () => {
+  let manager: AccountWindowManager;
+  let factory: ReturnType<typeof makeFactory>;
+  const removed = vi.fn();
+
+  beforeEach(() => {
+    accountHooks.clearAccountWebContentsHooksForTests();
+    removed.mockClear();
+    accountHooks.onAccountRemoved(removed);
+    factory = makeFactory();
+    manager = new AccountWindowManager(factory);
+  });
+
+  afterEach(() => {
+    manager.destroyAll();
+    accountHooks.clearAccountWebContentsHooksForTests();
+  });
+
+  it('replaces the renderer during dehydration and hydration without removing the account', () => {
+    const created = vi.fn();
+    const disposed = vi.fn();
+    accountHooks.onAccountWebContentsCreated((info) => {
+      created(info.webContents);
+      return disposed;
+    });
+    const index = asAccountIndex(2);
+    const original = manager.createAccountWindow('https://example.com/two', index);
+
+    manager.dehydrateAccount(index);
+    const replacement = manager.hydrateAccount(index);
+
+    expect(removed).not.toHaveBeenCalled();
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(created.mock.calls).toEqual([[original.webContents], [replacement?.webContents]]);
+    expect(replacement?.webContents).not.toBe(original.webContents);
+    expect(manager.hasAccount(index)).toBe(true);
+  });
+
+  it('reports explicit removal of a retained dehydrated sparse account only once', () => {
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://example.com/seven', index);
+    manager.dehydrateAccount(index);
+
+    manager.unregisterAccount(index);
+    manager.unregisterAccount(index);
+
+    expect(removed.mock.calls).toEqual([[index]]);
+    expect(manager.hasAccount(index)).toBe(false);
+  });
+
+  it('reports every sparse live or retained account once during full teardown', () => {
+    for (const index of [0, 2, 7]) {
+      manager.createAccountWindow(`https://example.com/${index}`, asAccountIndex(index));
+    }
+    manager.dehydrateAccount(asAccountIndex(7));
+
+    manager.destroyAll();
+    manager.destroyAll();
+
+    expect(removed.mock.calls).toEqual([[0], [2], [7]]);
+  });
+
+  it('disposes the current renderer and removes its identity on native window close', () => {
+    const disposed = vi.fn();
+    accountHooks.onAccountWebContentsCreated(() => disposed);
+    const index = asAccountIndex(2);
+    const window = manager.createAccountWindow('https://example.com/two', index);
+    const senderId = asWebContentsId(window.webContents.id);
+
+    window.destroy();
+
+    expect(removed.mock.calls).toEqual([[index]]);
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(manager.getAccountForWebContents(senderId)).toBeNull();
+    expect(manager.hasAccount(index)).toBe(false);
+  });
+
+  it('keeps a failed hydration rollback retained instead of reporting permanent removal', () => {
+    const index = asAccountIndex(2);
+    manager.createAccountWindow('https://example.com/two', index);
+    manager.dehydrateAccount(index);
+    factory.createWindow.mockImplementation((url: string, partition: string) => {
+      const window = new h.MockBW({ webPreferences: { partition }, url });
+      vi.spyOn(window, 'setBounds').mockImplementation(() => {
+        throw new Error('bounds failed');
+      });
+      return asType<Electron.BrowserWindow>(window);
+    });
+
+    expect(() => manager.hydrateAccount(index)).toThrow('bounds failed');
+
+    expect(removed).not.toHaveBeenCalled();
+    expect(manager.hasAccount(index)).toBe(true);
+    expect(manager.isDehydrated(index)).toBe(true);
+    expect(manager.getAccountWebContents(index)).toBeNull();
+  });
+
+  it('does not emit shared removal hooks from an isolated manager', () => {
+    const isolated = new AccountWindowManager(makeFactory(), { isolated: true });
+    isolated.createAccountWindow('https://example.com/two', asAccountIndex(2));
+
+    isolated.destroyAll();
+
+    expect(removed).not.toHaveBeenCalled();
+  });
 });
