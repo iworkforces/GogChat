@@ -3,7 +3,7 @@
 
 appId: com.ocworkforces.gogchat
 productName: GogChat
-copyright: Copyright © 2026 iWorkforces
+copyright: Copyright © 2026 iworkforces
 
 # Protocol handler for deep linking
 protocols:
@@ -134,7 +134,7 @@ dmg:
 # Example: provider: github (uses GitHub Releases)
 publish:
   provider: github
-  owner: iWorkforces
+  owner: iworkforces
   repo: GogChat
 
 # Additional metadata

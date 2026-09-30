@@ -94,8 +94,8 @@ vi.mock('../utils/platform/packageInfo.js', () => ({
     version: '1.0.0',
     author: 'Test Author',
     description: 'Desktop wrapper for Google Chat',
-    repository: 'https://github.com/iWorkforces/GogChat',
-    homepage: 'https://github.com/iWorkforces/GogChat',
+    repository: 'https://github.com/iworkforces/GogChat',
+    homepage: 'https://github.com/iworkforces/GogChat',
     name: 'gogchat',
   }),
 }));
@@ -177,7 +177,7 @@ describe('aboutPanel', () => {
       author: "O'Reilly & Co",
       name: 'gogchat',
       homepage: '',
-      repository: 'https://github.com/iWorkforces/GogChat',
+      repository: 'https://github.com/iworkforces/GogChat',
       description: 'desc <b>x</b>',
     });
 
@@ -227,8 +227,8 @@ describe('aboutPanel', () => {
 
   it('exports isSafeAboutRepositoryUrl for https only', async () => {
     const { isSafeAboutRepositoryUrl } = await loadAboutPanel();
-    expect(isSafeAboutRepositoryUrl('https://github.com/iWorkforces/GogChat')).toBe(true);
-    expect(isSafeAboutRepositoryUrl('http://github.com/iWorkforces/GogChat')).toBe(false);
+    expect(isSafeAboutRepositoryUrl('https://github.com/iworkforces/GogChat')).toBe(true);
+    expect(isSafeAboutRepositoryUrl('http://github.com/iworkforces/GogChat')).toBe(false);
     expect(isSafeAboutRepositoryUrl('not a url')).toBe(false);
   });
 
