@@ -25,7 +25,17 @@ vi.mock('electron-log', () => ({
 
 const faviconCleanup = vi.fn();
 const unreadCleanup = vi.fn();
-const setupBadgeHandlers = vi.fn(() => ({ faviconCleanup, unreadCleanup }));
+const webContentsCleanup = vi.fn();
+const accountRemovedCleanup = vi.fn();
+const sessionCleanup = vi.fn();
+const cleanups = {
+  faviconCleanup,
+  unreadCleanup,
+  webContentsCleanup,
+  accountRemovedCleanup,
+  sessionCleanup,
+};
+const setupBadgeHandlers = vi.fn(() => cleanups);
 
 vi.mock('../utils/platform/badgeHelpers.js', () => ({
   setupBadgeHandlers: (...args: unknown[]) =>
@@ -41,9 +51,9 @@ function fakeTray() {
 
 describe('badgeIcon feature', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.resetModules();
-    setupBadgeHandlers.mockReturnValue({ faviconCleanup, unreadCleanup });
+    setupBadgeHandlers.mockReturnValue(cleanups);
   });
 
   describe('default export', () => {
@@ -70,14 +80,15 @@ describe('badgeIcon feature', () => {
       expect(() => feature.cleanupBadgeIcon()).not.toThrow();
     });
 
-    it('invokes both cleanup callbacks returned by setupBadgeHandlers', async () => {
+    it('invokes every IPC, hook and session cleanup callback', async () => {
       const feature = await import('./badgeIcon.js');
       feature.default(fakeWindow(), fakeTray());
 
       feature.cleanupBadgeIcon();
 
-      expect(faviconCleanup).toHaveBeenCalledTimes(1);
-      expect(unreadCleanup).toHaveBeenCalledTimes(1);
+      for (const cleanup of Object.values(cleanups)) {
+        expect(cleanup).toHaveBeenCalledTimes(1);
+      }
     });
 
     it('is idempotent — second call does not re-invoke cleanups', async () => {
@@ -89,6 +100,24 @@ describe('badgeIcon feature', () => {
 
       expect(faviconCleanup).toHaveBeenCalledTimes(1);
       expect(unreadCleanup).toHaveBeenCalledTimes(1);
+    });
+
+    it('attempts every cleanup once even when IPC and hook disposal fail', async () => {
+      faviconCleanup.mockImplementation(() => {
+        throw new Error('IPC disposal failed');
+      });
+      webContentsCleanup.mockImplementation(() => {
+        throw new Error('hook disposal failed');
+      });
+      const feature = await import('./badgeIcon.js');
+      feature.default(fakeWindow(), fakeTray());
+
+      expect(() => feature.cleanupBadgeIcon()).not.toThrow();
+      feature.cleanupBadgeIcon();
+
+      for (const cleanup of Object.values(cleanups)) {
+        expect(cleanup).toHaveBeenCalledTimes(1);
+      }
     });
   });
 });

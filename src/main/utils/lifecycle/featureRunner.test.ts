@@ -403,7 +403,7 @@ describe('featureRunner', () => {
       const runner = await loadRunnerWithPlan(plan);
 
       await runner.runPhase('critical', {});
-      await runner.cleanupAll({});
+      await runner.cleanupAll({}, new globalThis.AbortController().signal);
 
       expect(order).toEqual(['c', 'b', 'a']);
     });
@@ -417,7 +417,7 @@ describe('featureRunner', () => {
       const runner = await loadRunnerWithPlan(plan);
 
       await runner.runPhase('ui', {});
-      await runner.cleanupAll({});
+      await runner.cleanupAll({}, new globalThis.AbortController().signal);
 
       expect(cleanupB).toHaveBeenCalledTimes(1);
     });
@@ -443,7 +443,9 @@ describe('featureRunner', () => {
       const runner = await loadRunnerWithPlan(plan);
 
       await runner.runPhase('deferred', {});
-      await expect(runner.cleanupAll({})).resolves.toBeUndefined();
+      await expect(
+        runner.cleanupAll({}, new globalThis.AbortController().signal)
+      ).resolves.toBeUndefined();
 
       expect(cleanupB).toHaveBeenCalledTimes(1);
     });
@@ -462,13 +464,15 @@ describe('featureRunner', () => {
       await runner.runPhase('critical', {});
       expect(runner._getInitializedForTest()).toHaveLength(1);
 
-      await runner.cleanupAll({});
+      await runner.cleanupAll({}, new globalThis.AbortController().signal);
       expect(runner._getInitializedForTest()).toHaveLength(0);
     });
 
     it('is a no-op when nothing has been initialized', async () => {
       const runner = await loadRunnerWithPlan(emptyPlan());
-      await expect(runner.cleanupAll({})).resolves.toBeUndefined();
+      await expect(
+        runner.cleanupAll({}, new globalThis.AbortController().signal)
+      ).resolves.toBeUndefined();
     });
   });
 

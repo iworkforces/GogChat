@@ -35,7 +35,7 @@ export function registerFastHandler<T>(config: FastHandlerConfig<T>): () => void
   const rateLimiter = getRateLimiter();
 
   const listener = (event: IpcMainEvent, data: unknown): void => {
-    if (!rateLimiter.isAllowed(channel, rateLimit)) return;
+    if (!rateLimiter.isAllowed(channel, rateLimit, event.sender.id)) return;
 
     let validated: T;
     try {

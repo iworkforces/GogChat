@@ -301,6 +301,7 @@ import {
   destroyAccountViewManager,
 } from './accountViewManager.js';
 import { asAccountIndex, asWebContentsId } from '../../../shared/types/branded.js';
+import * as accountHooks from './accountWebContentsHooks.js';
 import { configGet } from '../../config.js';
 import { flushAccountWindowsWrites } from './accountWindowsStore.js';
 import {
@@ -1453,4 +1454,90 @@ runSharedRoutingScenarios({
       getHostWebContents: () => manager.getMostRecentWindow()?.webContents ?? null,
     };
   },
+});
+
+describe('AccountViewManager permanent removal hooks', () => {
+  let manager: AccountViewManager;
+  const removed = vi.fn();
+
+  beforeEach(() => {
+    accountHooks.clearAccountWebContentsHooksForTests();
+    removed.mockClear();
+    accountHooks.onAccountRemoved(removed);
+    manager = new AccountViewManager();
+  });
+
+  afterEach(() => {
+    manager.destroyAll();
+    accountHooks.clearAccountWebContentsHooksForTests();
+  });
+
+  it('keeps the same live renderer and hook disposer when parking and hydrating', () => {
+    const created = vi.fn();
+    const disposed = vi.fn();
+    accountHooks.onAccountWebContentsCreated((info) => {
+      created(info.webContents);
+      return disposed;
+    });
+    manager.createAccountWindow('https://example.com/zero', asAccountIndex(0));
+    manager.createAccountWindow('https://example.com/two', asAccountIndex(2));
+    const original = manager.getAccountWebContents(asAccountIndex(2));
+
+    manager.dehydrateAccount(asAccountIndex(2));
+    manager.hydrateAccount(asAccountIndex(2));
+
+    expect(removed).not.toHaveBeenCalled();
+    expect(disposed).not.toHaveBeenCalled();
+    expect(created).toHaveBeenCalledTimes(2);
+    expect(manager.getAccountWebContents(asAccountIndex(2))).toBe(original);
+    expect(original?.isDestroyed()).toBe(false);
+  });
+
+  it('reports explicit removal of a parked sparse account only once', () => {
+    manager.createAccountWindow('https://example.com/zero', asAccountIndex(0));
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://example.com/seven', index);
+    manager.dehydrateAccount(index);
+    const senderId = asWebContentsId(manager.getAccountWebContents(index)?.id ?? 0);
+
+    manager.unregisterAccount(index);
+    manager.unregisterAccount(index);
+
+    expect(removed.mock.calls).toEqual([[index]]);
+    expect(manager.getAccountForWebContents(senderId)).toBeNull();
+    expect(manager.hasAccount(index)).toBe(false);
+  });
+
+  it('reports sparse parked and live accounts once on native host close', () => {
+    for (const index of [0, 2, 7]) {
+      manager.createAccountWindow(`https://example.com/${index}`, asAccountIndex(index));
+    }
+    manager.dehydrateAccount(asAccountIndex(7));
+
+    lastWindow().destroy();
+
+    expect(removed.mock.calls).toEqual([[0], [2], [7]]);
+    expect(manager.listAccountIndices()).toEqual([]);
+  });
+
+  it('reports sparse parked and live accounts once during repeated full teardown', () => {
+    for (const index of [0, 2, 7]) {
+      manager.createAccountWindow(`https://example.com/${index}`, asAccountIndex(index));
+    }
+    manager.dehydrateAccount(asAccountIndex(7));
+
+    manager.destroyAll();
+    manager.destroyAll();
+
+    expect(removed.mock.calls).toEqual([[0], [2], [7]]);
+  });
+
+  it('does not emit shared removal hooks from an isolated manager', () => {
+    const isolated = new AccountViewManager(undefined, { isolated: true });
+    isolated.createAccountWindow('https://example.com/two', asAccountIndex(2));
+
+    isolated.destroyAll();
+
+    expect(removed).not.toHaveBeenCalled();
+  });
 });

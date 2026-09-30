@@ -2,7 +2,7 @@
  * badgeIcon feature — thin registration layer.
  *
  * Delegates all IPC handler logic (favicon → icon type, unread count →
- * dock badge) to ./badgeHandlers.ts. This module only owns the feature
+ * dock badge) to ../utils/platform/badgeHelpers.ts. This module only owns the feature
  * lifecycle: holding cleanup references and exposing cleanupBadgeIcon().
  */
 
@@ -10,33 +10,35 @@ import type { BrowserWindow, Tray } from 'electron';
 import log from 'electron-log';
 import { toErrorMessage } from '../utils/lifecycle/errorUtils.js';
 import { setupBadgeHandlers } from '../utils/platform/badgeHelpers.js';
+import type { BadgeHandlerCleanups } from '../utils/platform/badgeHelpers.js';
 
-let faviconChangedCleanup: (() => void) | null = null;
-let unreadCountCleanup: (() => void) | null = null;
+let handlerCleanups: BadgeHandlerCleanups | null = null;
 
 export default (window: BrowserWindow, trayIcon: Tray): void => {
-  const { faviconCleanup, unreadCleanup } = setupBadgeHandlers(window, trayIcon);
-  faviconChangedCleanup = faviconCleanup;
-  unreadCountCleanup = unreadCleanup;
+  handlerCleanups = setupBadgeHandlers(window, trayIcon);
 };
 
 /**
  * Cleanup function for badge icon feature.
  */
 export function cleanupBadgeIcon(): void {
-  try {
-    log.debug('[BadgeIcon] Cleaning up badge icon listeners');
-    if (faviconChangedCleanup) {
-      faviconChangedCleanup();
-      faviconChangedCleanup = null;
+  const cleanups = handlerCleanups;
+  handlerCleanups = null;
+  if (!cleanups) return;
+  log.debug('[BadgeIcon] Cleaning up badge icon listeners');
+  const cleanupCallbacks: readonly (() => void)[] = [
+    cleanups.faviconCleanup,
+    cleanups.unreadCleanup,
+    cleanups.webContentsCleanup,
+    cleanups.accountRemovedCleanup,
+    cleanups.sessionCleanup,
+  ];
+  for (const cleanup of cleanupCallbacks) {
+    try {
+      cleanup();
+    } catch (error: unknown) {
+      log.error('[BadgeIcon] Failed to cleanup badge icon:', toErrorMessage(error));
     }
-
-    if (unreadCountCleanup) {
-      unreadCountCleanup();
-      unreadCountCleanup = null;
-    }
-    log.info('[BadgeIcon] Badge icon cleaned up');
-  } catch (error: unknown) {
-    log.error('[BadgeIcon] Failed to cleanup badge icon:', toErrorMessage(error));
   }
+  log.info('[BadgeIcon] Badge icon cleaned up');
 }

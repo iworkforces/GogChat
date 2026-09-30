@@ -21,6 +21,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AccountWindowRegistry } from './accountWindowRegistry';
 import { MockBrowserWindow } from '../../../../tests/mocks/electron';
 import type { BrowserWindow } from 'electron';
+import { asAccountIndex, asWebContentsId } from '../../../shared/types/branded.js';
+import { asType } from '../../../shared/typeUtils.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -411,5 +413,58 @@ describe('AccountWindowRegistry — listAccountIndices', () => {
 
   it('returns empty array when no accounts', () => {
     expect(registry.listAccountIndices()).toEqual([]);
+  });
+});
+
+describe('AccountWindowRegistry native close ownership', () => {
+  it('removes destroyed-window reverse identity and reports its native close once', () => {
+    const onAccountClosed = vi.fn();
+    const registry = new AccountWindowRegistry({ onAccountClosed });
+    const window = makeTypedWindow();
+    const index = asAccountIndex(2);
+    const senderId = asWebContentsId(window.webContents.id);
+    registry.registerWindow(window, index);
+
+    window.destroy();
+
+    expect(onAccountClosed.mock.calls).toEqual([[index]]);
+    expect(registry.getAccountForWebContents(senderId)).toBeNull();
+    expect(registry.hasAccount(index)).toBe(false);
+  });
+
+  it('does not report internal unregistration or registry teardown as native close', () => {
+    const onAccountClosed = vi.fn();
+    const registry = new AccountWindowRegistry({ onAccountClosed });
+    const first = makeTypedWindow();
+    registry.registerWindow(first, asAccountIndex(2));
+    registry.registerWindow(makeTypedWindow(), asAccountIndex(7));
+
+    registry.unregisterAccount(asAccountIndex(2));
+    first.destroy();
+    registry.destroyAll();
+
+    expect(onAccountClosed).not.toHaveBeenCalled();
+  });
+
+  it('does not let a delayed old closed event remove the replacement account', () => {
+    const onAccountClosed = vi.fn();
+    const registry = new AccountWindowRegistry({ onAccountClosed });
+    const index = asAccountIndex(2);
+    const oldWindow = makeTypedWindow();
+    const replacement = makeTypedWindow();
+    registry.registerWindow(oldWindow, index);
+    const oldClosed = asType<() => void>(oldWindow.listeners('closed')[0]);
+    registry.registerWindow(replacement, index);
+
+    oldClosed();
+
+    expect(registry.getAccountWindow(index)).toBe(replacement);
+    expect(registry.getAccountForWebContents(asWebContentsId(oldWindow.webContents.id))).toBeNull();
+    expect(registry.getAccountForWebContents(asWebContentsId(replacement.webContents.id))).toBe(
+      index
+    );
+    expect(onAccountClosed).not.toHaveBeenCalled();
+    registry.destroyAll();
+    oldWindow.destroy();
   });
 });

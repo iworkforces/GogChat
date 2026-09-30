@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { collectReleaseArtifactSidecarEvidence } from './release-artifact-sidecar.js';
+import { copyVerifiedArtifacts } from './release-artifact-staging.js';
 import {
   findMacosDmgs,
   findMacosPackageArtifactViolations,
@@ -107,11 +107,12 @@ function collectSidecarEvidence(inputDir, options = {}) {
     return {
       violations: [`Failed to inspect sidecar evidence: ${error.message}`],
       pairs: [],
+      files: [],
     };
   }
 }
 
-export function findReleaseArtifactViolations(inputDir, options = {}) {
+function collectReleaseEvidence(inputDir, options = {}) {
   const macViolations = splitMissingViolations(
     findMacosPackageArtifactViolations(inputDir, REQUIRED_MACOS_ARCHES),
     'macOS'
@@ -122,42 +123,21 @@ export function findReleaseArtifactViolations(inputDir, options = {}) {
   );
   const sidecarEvidence = collectSidecarEvidence(inputDir, options);
 
-  return [
-    ...macViolations.missing,
-    ...windowsViolations.missing,
-    ...findDuplicateArtifactFileNames(inputDir),
-    ...macViolations.remaining,
-    ...windowsViolations.remaining,
-    ...sidecarEvidence.violations,
-  ];
+  return {
+    ...sidecarEvidence,
+    violations: [
+      ...macViolations.missing,
+      ...windowsViolations.missing,
+      ...findDuplicateArtifactFileNames(inputDir),
+      ...macViolations.remaining,
+      ...windowsViolations.remaining,
+      ...sidecarEvidence.violations,
+    ],
+  };
 }
 
-function findVerifiedReleaseArtifacts(inputDir, options = {}) {
-  const { pairs } = collectSidecarEvidence(inputDir, options);
-  return pairs
-    .flatMap((pair) => [pair.binaryRelativePath, pair.sidecarRelativePath])
-    .sort((left, right) => left.localeCompare(right));
-}
-
-function sha256File(filePath) {
-  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-}
-
-function copyVerifiedArtifacts(inputDir, outputDir, options = {}) {
-  fs.rmSync(outputDir, { recursive: true, force: true });
-  fs.mkdirSync(outputDir, { recursive: true });
-
-  const artifacts = findVerifiedReleaseArtifacts(inputDir, options);
-  const checksumLines = [];
-  for (const artifact of artifacts) {
-    const sourcePath = path.join(inputDir, artifact);
-    const outputFileName = path.basename(artifact);
-    const outputPath = path.join(outputDir, outputFileName);
-    fs.copyFileSync(sourcePath, outputPath);
-    checksumLines.push(`${sha256File(outputPath)}  ${outputFileName}`);
-  }
-  fs.writeFileSync(path.join(outputDir, 'SHA256SUMS.txt'), `${checksumLines.join('\n')}\n`);
-  return artifacts;
+export function findReleaseArtifactViolations(inputDir, options = {}) {
+  return collectReleaseEvidence(inputDir, options).violations;
 }
 
 function parseArgs(argv) {
@@ -230,7 +210,7 @@ function runCli(argv) {
     sourceSha: parsed.sourceSha,
     packageVersion: parsed.packageVersion,
   };
-  const violations = findReleaseArtifactViolations(inputDir, identity);
+  const { violations, files } = collectReleaseEvidence(inputDir, identity);
   if (violations.length > 0) {
     console.error(violations.join('\n'));
     process.exit(1);
@@ -238,13 +218,26 @@ function runCli(argv) {
 
   if (parsed.outputDir !== null) {
     const outputDir = path.resolve(process.cwd(), parsed.outputDir);
-    const artifacts = copyVerifiedArtifacts(inputDir, outputDir, identity);
-    console.log(`Verified ${artifacts.length} release artifacts into ${outputDir}`);
+    copyVerifiedArtifacts({
+      inputDir,
+      outputDir,
+      files,
+      validateStagedArtifacts: (stagingDir) => collectReleaseEvidence(stagingDir, identity),
+    });
+    console.log(`Verified ${files.length} release artifacts into ${outputDir}`);
     return;
   }
 
   console.log(
-    JSON.stringify({ artifacts: findVerifiedReleaseArtifacts(inputDir, identity) }, null, 2)
+    JSON.stringify(
+      {
+        artifacts: files
+          .map((file) => file.relativePath)
+          .sort((left, right) => left.localeCompare(right)),
+      },
+      null,
+      2
+    )
   );
 }
 
@@ -261,6 +254,7 @@ if (isCli) {
       console.error(usage());
       process.exit(2);
     }
-    throw error;
+    console.error(error.message);
+    process.exit(1);
   }
 }

@@ -73,13 +73,14 @@ export function inspectReleaseArtifactFile(filePath, relativePath = path.basenam
     if (!stat.isFile()) {
       return { ok: false, violation: `Unreadable artifact ${relativePath}: not a regular file` };
     }
-    if (stat.size <= 0) {
+    const bytes = fs.readFileSync(filePath);
+    if (bytes.length <= 0) {
       return { ok: false, violation: `Empty artifact ${relativePath}` };
     }
     return {
       ok: true,
-      size: stat.size,
-      sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'),
+      size: bytes.length,
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     };
   } catch (error) {
     return {
@@ -95,7 +96,12 @@ function readSidecarText(filePath, relativePath) {
     if (!stat.isFile()) {
       return { ok: false, violation: `Unreadable sidecar ${relativePath}: not a regular file` };
     }
-    return { ok: true, raw: fs.readFileSync(filePath, 'utf8') };
+    const bytes = fs.readFileSync(filePath);
+    return {
+      ok: true,
+      raw: bytes.toString('utf8'),
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    };
   } catch (error) {
     return {
       ok: false,
@@ -319,6 +325,7 @@ export function collectReleaseArtifactSidecarEvidence({
 }) {
   const violations = [];
   const pairs = [];
+  const files = [];
   const normalizedSourceSha = normalizeSourceSha(expectedSourceSha);
   const normalizedVersion = String(expectedPackageVersion ?? '').trim();
 
@@ -367,7 +374,7 @@ export function collectReleaseArtifactSidecarEvidence({
   }
 
   if (normalizedSourceSha === null || normalizedVersion === '') {
-    return { violations, pairs };
+    return { violations, pairs, files };
   }
 
   for (const basename of [...artifactsByBasename.keys()].sort((left, right) =>
@@ -423,9 +430,13 @@ export function collectReleaseArtifactSidecarEvidence({
       binaryRelativePath: artifact.relativePath,
       sidecarRelativePath: sidecar.relativePath,
     });
+    files.push(
+      { relativePath: artifact.relativePath, sha256: inspected.sha256 },
+      { relativePath: sidecar.relativePath, sha256: sidecarText.sha256 }
+    );
   }
 
-  return { violations, pairs };
+  return { violations, pairs, files };
 }
 
 export function findReleaseArtifactSidecarViolations(options) {

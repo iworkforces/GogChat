@@ -1,5 +1,7 @@
 /* global AbortSignal, AbortController */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { registerShutdownHandler as RegisterShutdownHandler } from './registerShutdown.js';
+import type * as StartupAdmission from '../utils/lifecycle/startupAdmission.js';
 
 type BeforeQuitEvent = { preventDefault: () => void };
 type BeforeQuitListener = (event: BeforeQuitEvent) => void;
@@ -55,11 +57,12 @@ vi.mock('./shutdownDiagnostics.js', () => ({
 }));
 
 import {
-  registerShutdownHandler,
   SHUTDOWN_OVERALL_TIMEOUT_MS,
   SHUTDOWN_STAGE_TIMEOUT_MS,
   type ShutdownDeadlineFactory,
 } from './registerShutdown.js';
+let registerShutdownHandler: typeof RegisterShutdownHandler;
+let admission: typeof StartupAdmission;
 
 function getBeforeQuitListener(): BeforeQuitListener {
   const listener = mocks.beforeQuitListeners[0];
@@ -103,7 +106,10 @@ describe('registerShutdownHandler', () => {
     vi.useRealTimers();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ registerShutdownHandler } = await import('./registerShutdown.js'));
+    admission = await import('../utils/lifecycle/startupAdmission.js');
     vi.clearAllMocks();
     vi.useRealTimers();
     mocks.beforeQuitListeners.length = 0;
@@ -133,6 +139,28 @@ describe('registerShutdownHandler', () => {
     expect(order).toEqual(['features', 'global', 'accounts', 'diagnostics', 'singletons', 'exit']);
     expect(mocks.peekAccountWindowManager).toHaveBeenCalled();
     expect(mocks.logShutdownDiagnostics).toHaveBeenCalledWith({ accountIndices: [0, 1] });
+  });
+
+  it('closes startup synchronously before scheduling cleanup and shares the stage/overall budget', async () => {
+    const stage = new AbortController();
+    const overall = new AbortController();
+    let featureSignal: AbortSignal | undefined;
+    mocks.cleanupAll.mockImplementation(async (_context, signal: AbortSignal) => {
+      featureSignal = signal;
+    });
+    registerShutdownHandler({
+      createStageSignal: () => stage.signal,
+      createOverallSignal: () => overall.signal,
+    });
+    expect(admission.isStartupAdmissionOpen()).toBe(true);
+    getBeforeQuitListener()({ preventDefault: vi.fn() });
+    expect(admission.isStartupAdmissionOpen()).toBe(false);
+    expect(mocks.cleanupAll).not.toHaveBeenCalled();
+    await waitForShutdown();
+    expect(featureSignal?.aborted).toBe(false);
+    overall.abort();
+    expect(featureSignal?.aborted).toBe(true);
+    expect(mocks.app.exit).toHaveBeenCalledTimes(1);
   });
 
   it('continues through every remaining stage when feature cleanup rejects', async () => {

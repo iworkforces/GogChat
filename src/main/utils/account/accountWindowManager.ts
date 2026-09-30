@@ -43,6 +43,7 @@ import { getAccountViewManager, resetAccountViewManagerSingleton } from './accou
 import {
   notifyAccountWebContentsCreated,
   notifyAccountWebContentsDestroyed,
+  notifyAccountRemoved,
   setAccountWebContentsHooksManager,
 } from './accountWebContentsHooks.js';
 
@@ -130,7 +131,14 @@ export class AccountWindowManager implements IAccountWindowManager {
       this.windowFactory = windowFactory;
     }
     this.isolated = options?.isolated === true;
-    this.registry = new AccountWindowRegistry({ preserveBootstrap: this.isolated });
+    this.registry = new AccountWindowRegistry({
+      preserveBootstrap: this.isolated,
+      onAccountClosed: (accountIndex) => {
+        this.emitWebContentsDestroyed(accountIndex);
+        this.cancelDehydrate(accountIndex);
+        this.emitAccountRemoved(accountIndex);
+      },
+    });
     if (!this.isolated) {
       // Reset shared bootstrap tracker so each manager instance starts clean
       clearAllBootstrap();
@@ -177,6 +185,12 @@ export class AccountWindowManager implements IAccountWindowManager {
       return;
     }
     notifyAccountWebContentsDestroyed(accountIndex);
+  }
+
+  private emitAccountRemoved(accountIndex: AccountIndex): void {
+    if (!this.isolated) {
+      notifyAccountRemoved(accountIndex);
+    }
   }
 
   // ─── Registry delegates ──────────────────────────────────────────────────
@@ -366,6 +380,7 @@ export class AccountWindowManager implements IAccountWindowManager {
   }
 
   unregisterAccount(accountIndex: AccountIndex): void {
+    const wasKnown = this.hasAccount(accountIndex);
     this.emitWebContentsDestroyed(accountIndex);
     const window = this.registry.getAccountWindow(accountIndex);
     if (window) {
@@ -374,6 +389,9 @@ export class AccountWindowManager implements IAccountWindowManager {
     this.cancelDehydrate(accountIndex);
     this.dehydratedAccounts.delete(accountIndex);
     this.registry.unregisterAccount(accountIndex);
+    if (wasKnown) {
+      this.emitAccountRemoved(accountIndex);
+    }
   }
 
   hasAccount(accountIndex: AccountIndex): boolean {
@@ -415,6 +433,7 @@ export class AccountWindowManager implements IAccountWindowManager {
     // Dispose multi-account WC hooks before tearing down windows (KD13 symmetry).
     for (const accountIndex of this.listAccountIndices()) {
       this.emitWebContentsDestroyed(accountIndex);
+      this.emitAccountRemoved(accountIndex);
     }
     for (const accountIndex of this.dehydrateTimers.keys()) {
       this.cancelDehydrate(accountIndex);
@@ -577,10 +596,9 @@ export class AccountWindowManager implements IAccountWindowManager {
     // Tear down per-account feature handlers (externalLinks, etc.) before destroy;
     // hydrate will re-notify create for the new WebContents.
     this.emitWebContentsDestroyed(accountIndex);
+    this.registry.unregisterAccount(accountIndex);
     log.info(`[AccountWindowManager] Dehydrating account ${accountIndex} (url=${snapshot.url})`);
     window.destroy();
-    // The registry's `closed` listener unregisters the window automatically;
-    // no manual unregister needed here.
   }
 
   /**

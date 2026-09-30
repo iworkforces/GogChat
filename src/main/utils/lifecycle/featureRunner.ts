@@ -16,14 +16,22 @@ import { perfMonitor } from './performanceMonitor.js';
 import { asType } from '../../../shared/typeUtils.js';
 import { asFeatureName } from '../../../shared/types/branded.js';
 import { platform } from '../platform/platformDetection.js';
+import { isStartupAdmissionOpen } from './startupAdmission.js';
 
 const PHASES: readonly FeaturePriority[] = ['security', 'critical', 'ui', 'deferred'];
 
-/** Features that have been initialized, in init order, for reverse-order cleanup. */
+/** Features that have been initialized, in completion order, for reverse-order cleanup. */
 const initialized: FeatureSpec[] = [];
+const pending = new Set<Promise<void>>();
+let cleanupAvailable = true;
+
+function isFeatureAdmissionOpen(): boolean {
+  return isStartupAdmissionOpen() && cleanupAvailable;
+}
 
 /** Initialize every feature in a single phase. Batches run sequentially; specs within a batch run in parallel. */
 export async function runPhase(phase: FeaturePriority, context: FeatureContext): Promise<void> {
+  if (!isFeatureAdmissionOpen()) return;
   const batches = FEATURE_PLAN[phase];
   if (!batches.length) {
     log.debug(`[FeatureRunner] No features in phase: ${phase}`);
@@ -35,6 +43,7 @@ export async function runPhase(phase: FeaturePriority, context: FeatureContext):
   log.info(`[FeatureRunner] Phase '${phase}': ${total} feature(s) in ${batches.length} batch(es)`);
 
   for (let i = 0; i < batches.length; i++) {
+    if (!isFeatureAdmissionOpen()) return;
     const batch = batches[i]!;
     const batchNumber = i + 1;
     log.debug(
@@ -57,6 +66,7 @@ export async function runPhase(phase: FeaturePriority, context: FeatureContext):
     if (requiredFailure?.status === 'rejected') {
       throw requiredFailure.reason;
     }
+    if (!isFeatureAdmissionOpen()) return;
     if (emitBatchMarkers) {
       perfMonitor.mark(
         `${phase}:batch:${batchNumber}:end`,
@@ -73,25 +83,38 @@ export async function runAllPhases(context: FeatureContext): Promise<void> {
   for (const phase of PHASES) await runPhase(phase, context);
 }
 
-/** Run every spec's optional cleanup sequentially in reverse-init order. */
-export async function cleanupAll(context: FeatureContext): Promise<void> {
+/** Run every spec's optional cleanup sequentially in reverse-completion order. */
+export async function cleanupAll(context: FeatureContext, signal: AbortSignal): Promise<void> {
+  if (!cleanupAvailable) return;
+  cleanupAvailable = false;
   log.info('[FeatureRunner] Starting feature cleanup');
-  for (const spec of [...initialized].reverse()) {
+  while ((initialized.length || pending.size) && !signal.aborted) {
+    const spec = initialized.pop();
+    if (!spec) {
+      if (!(await settleWithinBudget(Promise.race(pending), signal))) return;
+      continue;
+    }
     const cleanup = spec.cleanup;
     if (!cleanup) continue;
-
-    try {
-      await cleanup(context);
-      log.debug(`[FeatureRunner] ✓ cleaned up ${spec.name}`);
-    } catch (error) {
-      log.error(`[FeatureRunner] ✗ cleanup failed:`, error);
-    }
+    const work = (async () => {
+      try {
+        await cleanup(context);
+        log.debug(`[FeatureRunner] ✓ cleaned up ${spec.name}`);
+      } catch (error) {
+        log.error(`[FeatureRunner] ✗ cleanup failed:`, error);
+      }
+    })();
+    if (!(await settleWithinBudget(work, signal))) return;
   }
-  initialized.length = 0;
   log.info('[FeatureRunner] Feature cleanup completed');
 }
 
+async function settleWithinBudget(work: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
+  return (await import('./cleanupBudget.js')).settleWithinBudget(work, signal);
+}
+
 async function runFeature(spec: FeatureSpec, context: FeatureContext): Promise<void> {
+  if (!isFeatureAdmissionOpen()) return;
   const featureName = asFeatureName(spec.name);
   const supportedPlatforms = spec.platforms;
   if (supportedPlatforms && !supportedPlatforms.includes(platform.name)) {
@@ -100,6 +123,8 @@ async function runFeature(spec: FeatureSpec, context: FeatureContext): Promise<v
   }
 
   const start = Date.now();
+  const settlement = Promise.withResolvers<void>();
+  pending.add(settlement.promise);
   try {
     await spec.init(context);
     initialized.push(spec);
@@ -112,6 +137,9 @@ async function runFeature(spec: FeatureSpec, context: FeatureContext): Promise<v
       throw error;
     }
     log.warn(`[FeatureRunner] ✗ optional feature '${featureName}' failed:`, error);
+  } finally {
+    pending.delete(settlement.promise);
+    settlement.resolve();
   }
 }
 

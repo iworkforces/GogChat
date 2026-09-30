@@ -21,6 +21,7 @@ import { asWebContentsId } from '../../../shared/types/branded.js';
  */
 export interface AccountWindowEntry {
   window: BrowserWindow;
+  webContentsId: WebContentsId;
   accountIndex: AccountIndex;
   createdAt: number;
 }
@@ -30,12 +31,17 @@ export interface AccountWindowEntry {
  */
 export class AccountWindowRegistry {
   private readonly preserveBootstrap: boolean;
+  private readonly onAccountClosed: ((accountIndex: AccountIndex) => void) | undefined;
   private windows = new Map<AccountIndex, AccountWindowEntry>();
   private reverseLookup = new Map<BrowserWindow, AccountIndex>();
   private mostRecentAccountIndex: AccountIndex | null = null;
 
-  constructor(options?: { preserveBootstrap?: boolean }) {
+  constructor(options?: {
+    preserveBootstrap?: boolean;
+    onAccountClosed?: (accountIndex: AccountIndex) => void;
+  }) {
     this.preserveBootstrap = options?.preserveBootstrap === true;
+    this.onAccountClosed = options?.onAccountClosed;
   }
   /**
    * Tracks event listeners attached to windows so they can be removed on re-register.
@@ -57,6 +63,10 @@ export class AccountWindowRegistry {
    * @param accountIndex - The account index (0, 1, 2, ...)
    */
   registerWindow(window: BrowserWindow, accountIndex: AccountIndex): void {
+    const previous = this.windows.get(accountIndex);
+    if (previous && previous.window !== window) {
+      this.unregisterAccount(accountIndex);
+    }
     // Clean up existing entry if re-registering
     if (this.reverseLookup.has(window)) {
       const existingIndex = this.reverseLookup.get(window);
@@ -67,6 +77,7 @@ export class AccountWindowRegistry {
 
     const entry: AccountWindowEntry = {
       window,
+      webContentsId: asWebContentsId(window.webContents.id),
       accountIndex,
       createdAt: Date.now(),
     };
@@ -88,7 +99,9 @@ export class AccountWindowRegistry {
       this.mostRecentAccountIndex = accountIndex;
     };
     const closedHandler = () => {
+      if (this.windows.get(accountIndex)?.window !== window) return;
       this.unregisterAccount(accountIndex);
+      this.onAccountClosed?.(accountIndex);
     };
 
     window.on('focus', focusHandler);
@@ -100,7 +113,7 @@ export class AccountWindowRegistry {
       show: showHandler,
       closed: closedHandler,
     });
-    this.webContentsToAccountIndex.set(asWebContentsId(window.webContents.id), accountIndex);
+    this.webContentsToAccountIndex.set(entry.webContentsId, accountIndex);
     log.info(`[AccountWindowRegistry] Registered window for account ${accountIndex}`);
   }
 
@@ -198,9 +211,7 @@ export class AccountWindowRegistry {
       }
 
       // Clean up webContents reverse index
-      if (!entry.window.isDestroyed()) {
-        this.webContentsToAccountIndex.delete(asWebContentsId(entry.window.webContents.id));
-      }
+      this.webContentsToAccountIndex.delete(entry.webContentsId);
 
       this.reverseLookup.delete(entry.window);
       this.windows.delete(accountIndex);
@@ -252,6 +263,7 @@ export class AccountWindowRegistry {
     this.webContentsToAccountIndex.clear();
 
     for (const entry of this.windows.values()) {
+      this.unregisterAccount(entry.accountIndex);
       if (!entry.window.isDestroyed()) {
         // Remove all webContents listeners before destroying
         const webContents = entry.window.webContents;

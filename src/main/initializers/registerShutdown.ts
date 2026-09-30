@@ -18,6 +18,7 @@ import {
 } from '../utils/account/accountWindowManager.js';
 import type { AccountIndex } from '../../shared/types/branded.js';
 import { destroyAllSingletons } from './singletonDestroyers.js';
+import { closeStartupAdmission } from '../utils/lifecycle/startupAdmission.js';
 
 export const SHUTDOWN_STAGE_TIMEOUT_MS = 2_000;
 export const SHUTDOWN_OVERALL_TIMEOUT_MS = 8_000;
@@ -34,54 +35,34 @@ export function createProductionShutdownDeadlines(): ShutdownDeadlineFactory {
   };
 }
 
-function observeLateRejection(name: string, work: Promise<void>): void {
-  void work.catch((error: unknown) => {
-    log.error(`[Main] ${name} late rejection:`, error);
-  });
-}
-
-async function awaitWithDeadline(
-  name: string,
-  work: Promise<void>,
-  signal: AbortSignal
-): Promise<void> {
-  if (signal.aborted) {
-    log.warn(`[Main] ${name} abandoned — deadline already expired`);
-    observeLateRejection(name, work);
-    return;
-  }
-
-  let onAbort: (() => void) | undefined;
-  const deadline = new Promise<void>((resolve) => {
-    onAbort = () => {
-      log.warn(`[Main] ${name} abandoned after deadline`);
-      resolve();
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-
-  try {
-    await Promise.race([work, deadline]);
-  } finally {
-    if (onAbort) {
-      signal.removeEventListener('abort', onAbort);
-    }
-  }
-
-  observeLateRejection(name, work);
-}
-
 async function runShutdownStage(
   name: string,
-  cleanup: () => void | Promise<void>,
+  cleanup: (signal: AbortSignal) => void | Promise<void>,
   createStageSignal: () => AbortSignal
 ): Promise<void> {
+  const signal = createStageSignal();
   const work = Promise.resolve()
-    .then(cleanup)
+    .then(() => cleanup(signal))
     .catch((error: unknown) => {
       log.error(`[Main] ${name} failed:`, error);
     });
-  await awaitWithDeadline(name, work, createStageSignal());
+  if (signal.aborted) {
+    log.warn(`[Main] ${name} abandoned — deadline already expired`);
+    return;
+  }
+
+  const deadline = Promise.withResolvers<void>();
+  const onAbort = (): void => {
+    log.warn(`[Main] ${name} abandoned after deadline`);
+    deadline.resolve();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    await Promise.race([work, deadline.promise]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -109,9 +90,13 @@ export function registerShutdownHandler(
   };
 
   app.on('before-quit', (event) => {
+    closeStartupAdmission();
     event.preventDefault(); // Prevent immediate quit until cleanup is done
     if (isShuttingDown) return;
     isShuttingDown = true;
+    const overall = deadlines.createOverallSignal();
+    const createStageSignal = (): AbortSignal =>
+      AbortSignal.any([deadlines.createStageSignal(), overall]);
 
     void (async () => {
       log.info('[Main] ========== Application Shutdown ==========');
@@ -123,15 +108,15 @@ export function registerShutdownHandler(
       log.info('[Main] Cleaning up feature resources...');
       await runShutdownStage(
         'Feature cleanup',
-        hangStage === 'feature' ? hang : () => cleanupAll(getSharedFeatureContext()),
-        deadlines.createStageSignal
+        hangStage === 'feature' ? hang : (signal) => cleanupAll(getSharedFeatureContext(), signal),
+        createStageSignal
       );
       await runShutdownStage(
         'Global resource cleanup',
         hangStage === 'global'
           ? hang
           : () => getCleanupManager().cleanup({ includeGlobalResources: true, logDetails: true }),
-        deadlines.createStageSignal
+        createStageSignal
       );
       await runShutdownStage(
         'Account window manager cleanup',
@@ -144,7 +129,7 @@ export function registerShutdownHandler(
               }
               destroyAccountWindowManager();
             },
-        deadlines.createStageSignal
+        createStageSignal
       );
       await runShutdownStage(
         'Shutdown diagnostics',
@@ -155,12 +140,12 @@ export function registerShutdownHandler(
               const { logShutdownDiagnostics } = await import('./shutdownDiagnostics.js');
               await logShutdownDiagnostics({ accountIndices: diagnosticAccountIndices });
             },
-        deadlines.createStageSignal
+        createStageSignal
       );
       await runShutdownStage(
         'Singleton destruction',
         hangStage === 'singletons' ? hang : destroyAllSingletons,
-        deadlines.createStageSignal
+        createStageSignal
       );
 
       log.info('[Main] =====================================================');
@@ -170,7 +155,6 @@ export function registerShutdownHandler(
       })
       .finally(exitOnce);
 
-    const overall = deadlines.createOverallSignal();
     const onOverall = (): void => {
       log.warn('[Main] Overall shutdown abandoned after deadline');
       exitOnce();
