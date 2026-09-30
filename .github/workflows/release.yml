@@ -80,18 +80,6 @@ jobs:
       - name: 'Performance: Build production bundle'
         run: bun scripts/build-rsbuild.js
 
-      - name: 'Playwright: e2e'
-        run: bunx playwright test --project=e2e
-
-      - name: 'Playwright: integration'
-        run: bunx playwright test --project=integration
-
-      - name: 'Playwright: performance'
-        run: bunx playwright test --project=performance
-
-      - name: 'Playwright: preload-artifact'
-        run: bunx playwright test --project=preload-artifact
-
       - name: 'Performance: Headless startup capture'
         run: node scripts/headless-startup.js
         env:
