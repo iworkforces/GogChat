@@ -27,6 +27,7 @@ import { initializeStore } from '../config.js';
 import { createTrackedInterval } from '../utils/lifecycle/resourceCleanup.js';
 import environment from '../../environment.js';
 import { runPhase } from '../utils/lifecycle/featureRunner.js';
+import { isStartupAdmissionOpen } from '../utils/lifecycle/startupAdmission.js';
 import type { FeatureContext, FeatureCallbacks } from '../utils/lifecycle/featureConfigTypes.js';
 import { setSharedFeatureContext } from '../utils/lifecycle/featureContextStore.js';
 import type { WindowFactory } from '../../shared/types/window.js';
@@ -75,6 +76,7 @@ export function registerAppReady(options: AppReadyOptions): void {
   app
     .whenReady()
     .then(async () => {
+      if (!isStartupAdmissionOpen()) return;
       perfMonitor.mark('app-ready', 'Electron app ready');
 
       // ===== INITIALIZE ERROR HANDLER =====
@@ -88,9 +90,11 @@ export function registerAppReady(options: AppReadyOptions): void {
       }
 
       // Register global cleanups + security phase in parallel:
+      if (!isStartupAdmissionOpen()) return;
       // - registerGlobalCleanups: pure registration (no app.on, no network, no SafeStorage)
       // - security phase (cert pinning + permissions): independent of the cleanup registry
       await Promise.all([registerGlobalCleanups(), runPhase('security', context)]);
+      if (!isStartupAdmissionOpen()) return;
 
       // ===== CRITICAL PHASE + STORE INIT (parallel) =====
       // initializeStore requires app.ready + SafeStorage but NOT cert pinning or userAgent.
@@ -99,14 +103,18 @@ export function registerAppReady(options: AppReadyOptions): void {
         await Promise.all([
           runPhase('critical', context),
           (async () => {
+            if (!isStartupAdmissionOpen()) return;
             perfMonitor.mark('store-init-start', 'Config store init started');
             try {
               await initializeStore();
             } finally {
-              perfMonitor.mark('store-init-end', 'Config store init completed');
+              if (isStartupAdmissionOpen()) {
+                perfMonitor.mark('store-init-end', 'Config store init completed');
+              }
             }
           })(),
         ]);
+        if (!isStartupAdmissionOpen()) return;
         log.info('[Main] Config store initialized');
       } catch (error: unknown) {
         log.error('[Main] Failed to initialize critical phase or store:', error);
@@ -115,6 +123,7 @@ export function registerAppReady(options: AppReadyOptions): void {
 
       // ===== ACCOUNT WINDOW MANAGER INITIALIZATION =====
       const accountWindowManager = getAccountWindowManager(windowFactory);
+      if (!isStartupAdmissionOpen()) return;
       perfMonitor.mark('account-manager-init', 'Account window manager initialized');
 
       // Preconnect on the network thread before BrowserWindow construction so
@@ -143,7 +152,9 @@ export function registerAppReady(options: AppReadyOptions): void {
       }
 
       // Create account-0 window (primary window)
+      if (!isStartupAdmissionOpen()) return;
       createAccountWindow(environment.appUrl, asAccountIndex(0));
+      if (!isStartupAdmissionOpen()) return;
       accountWindowManager.markAsBootstrap(asAccountIndex(0));
       perfMonitor.mark('window-created', 'Main window created');
 
@@ -170,6 +181,7 @@ export function registerAppReady(options: AppReadyOptions): void {
       const account0Wc = accountWindowManager.getAccountWebContents(asAccountIndex(0));
       if (account0Wc && !account0Wc.isDestroyed()) {
         account0Wc.once('did-finish-load', () => {
+          if (!isStartupAdmissionOpen()) return;
           perfMonitor.mark('account-0-content-loaded', 'Account-0 initial page load completed');
           notifyDocumentLoadComplete();
         });
@@ -180,6 +192,7 @@ export function registerAppReady(options: AppReadyOptions): void {
         account0Wc.on(
           'did-fail-load',
           (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+            if (!isStartupAdmissionOpen()) return;
             if (!isMainFrame) return;
             if (errorCode === -3 /* ERR_ABORTED */) return;
             log.warn(
@@ -195,6 +208,7 @@ export function registerAppReady(options: AppReadyOptions): void {
 
       // ===== UI PHASE =====
       await runPhase('ui', context);
+      if (!isStartupAdmissionOpen()) return;
 
       perfMonitor.mark('features-loaded', 'Critical features initialized');
       log.info('[Main] Critical features initialized');
@@ -207,9 +221,11 @@ export function registerAppReady(options: AppReadyOptions): void {
       // Dynamic import keeps cacheWarmer + configProfiler out of lib/main/index.js
       // (mainBundleSize budget).
       setImmediate(() => {
+        if (!isStartupAdmissionOpen()) return;
         void (async () => {
           const { warmInitialIcons, warmSoonDeferredIcons, runDeferredPhase } =
             await import('../utils/account/cacheWarmer.js');
+          if (!isStartupAdmissionOpen()) return;
           warmInitialIcons();
           warmSoonDeferredIcons();
 
@@ -219,6 +235,7 @@ export function registerAppReady(options: AppReadyOptions): void {
           if (!app.isPackaged) {
             createTrackedInterval(
               () => {
+                if (!isStartupAdmissionOpen()) return;
                 perfMonitor.sampleAllRenderers(accountWindowManager);
               },
               60 * 1000,
@@ -226,12 +243,14 @@ export function registerAppReady(options: AppReadyOptions): void {
             );
           }
 
-          void runDeferredPhase({
+          await runDeferredPhase({
             context,
             getMainWindow,
             isDev: environment.isDev,
           });
-        })();
+        })().catch((error: unknown) => {
+          log.error('[Main] Failed to initialize deferred features:', error);
+        });
       });
     })
     .catch((error: unknown) => {

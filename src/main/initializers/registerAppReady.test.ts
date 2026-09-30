@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { asAccountIndex } from '../../shared/types/branded.js';
+import type { registerAppReady as RegisterAppReady } from './registerAppReady.js';
+import type { closeStartupAdmission as CloseStartupAdmission } from '../utils/lifecycle/startupAdmission.js';
 
 type ReadyHandler = () => Promise<void> | void;
 type WcListener = (...args: unknown[]) => void;
@@ -149,7 +151,9 @@ vi.mock('../utils/lifecycle/performanceFinalizer.js', () => ({
   notifyDocumentLoadComplete: mocks.notifyDocumentLoadComplete,
 }));
 
-import { registerAppReady } from './registerAppReady.js';
+import log from 'electron-log';
+let registerAppReady: typeof RegisterAppReady;
+let closeStartupAdmission: typeof CloseStartupAdmission;
 
 const scheduledImmediates: Array<(...args: unknown[]) => void> = [];
 
@@ -191,7 +195,10 @@ async function runReady(): Promise<void> {
 describe('registerAppReady characterization', () => {
   const originalPreconnect = process.env['GOGCHAT_DISABLE_PRECONNECT'];
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ registerAppReady } = await import('./registerAppReady.js'));
+    ({ closeStartupAdmission } = await import('../utils/lifecycle/startupAdmission.js'));
     mocks.order.length = 0;
     mocks.didFinishLoadListeners.length = 0;
     mocks.didFailLoadListeners.length = 0;
@@ -205,6 +212,15 @@ describe('registerAppReady characterization', () => {
       } as NodeJS.Immediate;
     }) as typeof setImmediate);
     vi.clearAllMocks();
+    mocks.runPhase.mockImplementation(async (phase: string) => {
+      mocks.order.push(`phase:${phase}`);
+    });
+    mocks.initializeStore.mockImplementation(async () => {
+      mocks.order.push('store-init');
+    });
+    mocks.runDeferredPhase.mockImplementation(async () => {
+      mocks.order.push('deferred-phase');
+    });
     mocks.account0Wc.isDestroyed.mockReturnValue(false);
     mocks.accountWindowManager.getAccountWebContents.mockReturnValue(mocks.account0Wc);
     mocks.app.isPackaged = true;
@@ -299,17 +315,22 @@ describe('registerAppReady characterization', () => {
   });
 
   it('does not relabel readiness when deferred phase rejects', async () => {
+    const error = new Error('deferred exploded');
     mocks.runDeferredPhase.mockImplementation(() => {
       mocks.order.push('deferred-phase');
-      const failure = Promise.reject(new Error('deferred exploded'));
-      void failure.catch(() => undefined);
-      return failure;
+      return Promise.reject(error);
     });
 
     await runReady();
     await vi.waitFor(() => expect(mocks.runPhase).toHaveBeenCalledWith('ui', expect.anything()));
     flushImmediate();
     await vi.waitFor(() => expect(mocks.runDeferredPhase).toHaveBeenCalled());
+    await vi.waitFor(() =>
+      expect(log.error).toHaveBeenCalledWith(
+        '[Main] Failed to initialize deferred features:',
+        error
+      )
+    );
 
     expect(mocks.order).toContain('mark:account-0-ready');
     expect(mocks.order).toContain('phase:ui');
@@ -335,5 +356,104 @@ describe('registerAppReady characterization', () => {
     expect(mocks.runDeferredPhase).not.toHaveBeenCalled();
     expect(mocks.preconnect).not.toHaveBeenCalled();
     expect(mocks.armPerformanceFinalizer).not.toHaveBeenCalled();
+  });
+
+  it('does no ready work when admission closes before whenReady resumes', async () => {
+    closeStartupAdmission();
+    await runReady();
+    await Promise.resolve();
+    expect(mocks.initializeErrorHandler).not.toHaveBeenCalled();
+    expect(mocks.runPhase).not.toHaveBeenCalled();
+    expect(mocks.getAccountWindowManager).not.toHaveBeenCalled();
+  });
+
+  it.each(['security', 'critical', 'ui'])(
+    'stops startup when held %s resumes after quit',
+    async (phase) => {
+      const held = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      mocks.runPhase.mockImplementation(async (current: string) => {
+        mocks.order.push(`phase:${current}`);
+        if (current === phase) {
+          entered.resolve();
+          await held.promise;
+        }
+      });
+      await runReady();
+      await entered.promise;
+
+      closeStartupAdmission();
+      held.resolve();
+      for (let microtask = 0; microtask < 12; microtask += 1) await Promise.resolve();
+
+      expect(scheduledImmediates).toHaveLength(0);
+      if (phase !== 'ui') {
+        expect(mocks.getAccountWindowManager).not.toHaveBeenCalled();
+        expect(mocks.createAccountWindow).not.toHaveBeenCalled();
+        expect(mocks.runPhase).not.toHaveBeenCalledWith('ui', expect.anything());
+      } else {
+        expect(mocks.order).not.toContain('mark:features-loaded');
+      }
+    }
+  );
+
+  it('does not construct the manager when held store initialization resumes after quit', async () => {
+    const held = Promise.withResolvers<void>();
+    mocks.initializeStore.mockImplementation(() => held.promise);
+    await runReady();
+    await vi.waitFor(() => expect(mocks.initializeStore).toHaveBeenCalled());
+    closeStartupAdmission();
+    held.resolve();
+    for (let microtask = 0; microtask < 12; microtask += 1) await Promise.resolve();
+    expect(mocks.getAccountWindowManager).not.toHaveBeenCalled();
+    expect(mocks.order).not.toContain('mark:store-init-end');
+  });
+
+  it.each([false, true])(
+    'guards detached warming across callback/import boundary (started=%s)',
+    async (started) => {
+      await runReady();
+      await vi.waitFor(() => expect(scheduledImmediates).toHaveLength(1));
+      if (started) flushImmediate();
+      closeStartupAdmission();
+      if (!started) flushImmediate();
+      for (let microtask = 0; microtask < 12; microtask += 1) await Promise.resolve();
+      expect(mocks.warmInitialIcons).not.toHaveBeenCalled();
+      expect(mocks.runDeferredPhase).not.toHaveBeenCalled();
+      expect(mocks.createTrackedInterval).not.toHaveBeenCalled();
+    }
+  );
+
+  it('guards document-load and renderer sampling callbacks after quit', async () => {
+    mocks.app.isPackaged = false;
+    await runReady();
+    await vi.waitFor(() => expect(scheduledImmediates).toHaveLength(1));
+    flushImmediate();
+    await vi.waitFor(() => expect(mocks.createTrackedInterval).toHaveBeenCalled());
+    const sample = mocks.createTrackedInterval.mock.calls[0]?.[0];
+    closeStartupAdmission();
+    mocks.didFinishLoadListeners[0]?.();
+    sample();
+    expect(mocks.notifyDocumentLoadComplete).not.toHaveBeenCalled();
+    expect(mocks.sampleAllRenderers).not.toHaveBeenCalled();
+  });
+
+  it('observes deferred rejection even after admission closes', async () => {
+    const held = Promise.withResolvers<void>();
+    mocks.runDeferredPhase.mockImplementation(() => held.promise);
+    await runReady();
+    await vi.waitFor(() => expect(scheduledImmediates).toHaveLength(1));
+    flushImmediate();
+    await vi.waitFor(() => expect(mocks.runDeferredPhase).toHaveBeenCalled());
+    closeStartupAdmission();
+    const error = new Error('late deferred failure');
+    held.reject(error);
+    await vi.waitFor(() =>
+      expect(log.error).toHaveBeenCalledWith(
+        '[Main] Failed to initialize deferred features:',
+        error
+      )
+    );
+    expect(mocks.app.quit).not.toHaveBeenCalled();
   });
 });
