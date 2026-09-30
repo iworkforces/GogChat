@@ -12,6 +12,7 @@ import {
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'perf_hooks';
+import type {} from '../../src/shared/types/bridge.js';
 
 /**
  * Performance thresholds (in milliseconds)
@@ -185,28 +186,35 @@ test.describe('Performance Regression Tests', () => {
       expect(cpuUsage).toBeLessThan(PERFORMANCE_THRESHOLDS.CPU_IDLE);
     });
 
-    test('should handle rapid IPC messages without degradation', async ({ mainWindow }) => {
-      const messageCount = 100;
-      const durations: number[] = [];
+    test.describe('Built preload IPC', () => {
+      test.use({ appPath: join(import.meta.dirname, '../..') });
 
-      for (let i = 0; i < messageCount; i++) {
-        const { duration } = await measureTime(`IPC Message ${i}`, async () => {
-          await mainWindow.evaluate((count) => {
-            if ((window as any).gogchat) {
-              (window as any).gogchat.sendUnreadCount(count);
-            }
-          }, i);
-        });
+      test('should handle rapid IPC messages without degradation', async ({ mainWindow }) => {
+        expect(await waitForLoadStateBounded(mainWindow, 'domcontentloaded', 8_000)).toBe(true);
+        expect(await mainWindow.evaluate(() => typeof window.gogchat.sendUnreadCount)).toBe(
+          'function'
+        );
 
-        durations.push(duration);
-      }
+        const messageCount = 100;
+        const durations: number[] = [];
 
-      // Calculate average and max duration
-      const avgDuration = durations.reduce((a, b) => a + b, 0) / durations.length;
-      const maxDuration = Math.max(...durations);
+        for (let i = 0; i < messageCount; i++) {
+          const { duration } = await measureTime(`IPC Message ${i}`, async () => {
+            await mainWindow.evaluate((count) => {
+              window.gogchat.sendUnreadCount(count);
+            }, i);
+          });
 
-      expect(avgDuration).toBeLessThan(PERFORMANCE_THRESHOLDS.IPC_AVERAGE);
-      expect(maxDuration).toBeLessThan(PERFORMANCE_THRESHOLDS.IPC_MAX);
+          durations.push(duration);
+        }
+
+        // Calculate average and max duration
+        const avgDuration = durations.reduce((a, b) => a + b, 0) / durations.length;
+        const maxDuration = Math.max(...durations);
+
+        expect(avgDuration).toBeLessThan(PERFORMANCE_THRESHOLDS.IPC_AVERAGE);
+        expect(maxDuration).toBeLessThan(PERFORMANCE_THRESHOLDS.IPC_MAX);
+      });
     });
   });
 
