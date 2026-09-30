@@ -68,6 +68,7 @@ import { createAccountWebPreferences } from './accountWebPreferences.js';
 import {
   notifyAccountWebContentsCreated,
   notifyAccountWebContentsDestroyed,
+  notifyAccountRemoved,
 } from './accountWebContentsHooks.js';
 
 /**
@@ -547,6 +548,7 @@ export class AccountViewManager implements IAccountWindowManager {
     this.views.delete(accountIndex);
     if (!this.isolated) {
       _clearBootstrap(accountIndex);
+      notifyAccountRemoved(accountIndex);
     }
     if (this.hostWindow && !this.hostWindow.isDestroyed()) {
       try {
