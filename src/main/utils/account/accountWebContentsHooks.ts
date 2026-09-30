@@ -18,6 +18,7 @@ export type AccountWcListener = (info: {
 }) => void | (() => void);
 
 const listeners = new Set<AccountWcListener>();
+const removalListeners = new Set<(accountIndex: AccountIndex) => void>();
 /** Disposers per listener per account index */
 const disposers = new Map<AccountWcListener, Map<AccountIndex, () => void>>();
 
@@ -128,6 +129,23 @@ export function notifyAccountWebContentsDestroyed(accountIndex: AccountIndex): v
   }
 }
 
+export function onAccountRemoved(listener: (accountIndex: AccountIndex) => void): () => void {
+  removalListeners.add(listener);
+  return () => {
+    removalListeners.delete(listener);
+  };
+}
+
+export function notifyAccountRemoved(accountIndex: AccountIndex): void {
+  for (const listener of removalListeners) {
+    try {
+      listener(accountIndex);
+    } catch (error: unknown) {
+      log.error('[AccountWebContentsHooks] Removal listener failed:', error);
+    }
+  }
+}
+
 /** Test helper */
 export function clearAccountWebContentsHooksForTests(): void {
   for (const listener of [...listeners]) {
@@ -135,5 +153,6 @@ export function clearAccountWebContentsHooksForTests(): void {
   }
   listeners.clear();
   disposers.clear();
+  removalListeners.clear();
   managerRef = null;
 }

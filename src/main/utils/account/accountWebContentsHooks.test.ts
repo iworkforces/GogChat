@@ -7,6 +7,8 @@ import {
   clearAccountWebContentsHooksForTests,
   notifyAccountWebContentsCreated,
   notifyAccountWebContentsDestroyed,
+  notifyAccountRemoved,
+  onAccountRemoved,
   onAccountWebContentsCreated,
   setAccountWebContentsHooksManager,
 } from './accountWebContentsHooks.js';
@@ -82,5 +84,51 @@ describe('accountWebContentsHooks', () => {
 
   it('destroy for unknown index is a no-op', () => {
     expect(() => notifyAccountWebContentsDestroyed(asAccountIndex(99))).not.toThrow();
+  });
+
+  it('does not equate WebContents destruction with permanent account removal', () => {
+    const removed = vi.fn();
+    const unsubscribe = onAccountRemoved(removed);
+
+    notifyAccountWebContentsDestroyed(asAccountIndex(2));
+
+    expect(removed).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it('unsubscribes only the owning permanent-removal listener', () => {
+    const owned = vi.fn();
+    const external = vi.fn();
+    const unsubscribe = onAccountRemoved(owned);
+    onAccountRemoved(external);
+    unsubscribe();
+    unsubscribe();
+
+    notifyAccountRemoved(asAccountIndex(7));
+
+    expect(owned).not.toHaveBeenCalled();
+    expect(external).toHaveBeenCalledWith(asAccountIndex(7));
+  });
+
+  it('contains a removal-listener failure without skipping later listeners', () => {
+    onAccountRemoved(() => {
+      throw new Error('removal failed');
+    });
+    const next = vi.fn();
+    onAccountRemoved(next);
+
+    expect(() => notifyAccountRemoved(asAccountIndex(7))).not.toThrow();
+
+    expect(next).toHaveBeenCalledWith(asAccountIndex(7));
+  });
+
+  it('clears permanent-removal subscriptions between test sessions', () => {
+    const removed = vi.fn();
+    onAccountRemoved(removed);
+    clearAccountWebContentsHooksForTests();
+
+    notifyAccountRemoved(asAccountIndex(2));
+
+    expect(removed).not.toHaveBeenCalled();
   });
 });
