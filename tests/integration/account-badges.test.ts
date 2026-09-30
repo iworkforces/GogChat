@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -346,7 +346,8 @@ async function withBackend(
   backend: AccountBackendKind,
   run: (app: LaunchedElectronApp) => Promise<void>
 ): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), 'gogchat-account-badges-'));
+  // Match Electron's canonical userData path when deriving the fixture encryption key.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'gogchat-account-badges-')));
   let app: LaunchedElectronApp | undefined;
   try {
     await seedUserData(directory, backend);
