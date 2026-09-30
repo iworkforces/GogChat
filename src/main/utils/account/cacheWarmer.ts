@@ -18,6 +18,7 @@ import { compareStorePerformance } from '../lifecycle/configProfiler.js';
 import { runPhase } from '../lifecycle/featureRunner.js';
 import type { FeatureContext } from '../lifecycle/featureConfigTypes.js';
 import { notifyDeferredPhaseComplete } from '../lifecycle/performanceFinalizer.js';
+import { isStartupAdmissionOpen } from '../lifecycle/startupAdmission.js';
 
 /** Delay (ms) before idle cache warming fires after deferred features load. */
 const IDLE_WARM_DELAY_MS = 8000;
@@ -43,6 +44,7 @@ const ADDITIONAL_ICON_PATHS = [
  * before the UI phase). Sets the 'icons-cached' perf mark.
  */
 export function warmInitialIcons(): void {
+  if (!isStartupAdmissionOpen()) return;
   getIconCache().warmCache();
   perfMonitor.mark('icons-cached', 'Icons pre-loaded');
 }
@@ -53,6 +55,7 @@ export function warmInitialIcons(): void {
  * notification can render the correct icon within ~50ms of startup.
  */
 export function warmSoonDeferredIcons(): void {
+  if (!isStartupAdmissionOpen()) return;
   const iconCache = getIconCache();
   for (const iconPath of SOON_DEFERRED_ICON_PATHS) {
     iconCache.getIcon(iconPath);
@@ -79,6 +82,7 @@ export interface DeferredPhaseOptions {
  * - Schedules idle cache warming via tracked timeout
  */
 export async function runDeferredPhase(options: DeferredPhaseOptions): Promise<void> {
+  if (!isStartupAdmissionOpen()) return;
   const { context, getMainWindow, isDev } = options;
 
   const currentMainWindow = getMainWindow();
@@ -92,6 +96,7 @@ export async function runDeferredPhase(options: DeferredPhaseOptions): Promise<v
 
   // Initialize deferred features (parallel within precomputed dep batches)
   await runPhase('deferred', context);
+  if (!isStartupAdmissionOpen()) return;
 
   perfMonitor.mark('all-features-loaded', 'All features initialized', true);
   log.info('[Main] All features initialized');
@@ -117,7 +122,7 @@ export async function runDeferredPhase(options: DeferredPhaseOptions): Promise<v
  * `account-0-content-loaded` and renderer evidence. See performanceFinalizer.
  */
 export function runDevPostDeferred(isDev: boolean): void {
-  if (!isDev) return;
+  if (!isStartupAdmissionOpen() || !isDev) return;
 
   if (process.env['ENABLE_CONFIG_PROFILING'] === 'true') {
     log.info('[Main] Running config store performance analysis...');
@@ -131,6 +136,7 @@ export function runDevPostDeferred(isDev: boolean): void {
  * ⚡ OPTIMIZATION: Preloads commonly accessed data after all features loaded.
  */
 export function scheduleIdleCacheWarming(): void {
+  if (!isStartupAdmissionOpen()) return;
   createTrackedTimeout(
     () => {
       warmCachesOnIdle();
@@ -145,6 +151,7 @@ export function scheduleIdleCacheWarming(): void {
  * ⚡ OPTIMIZATION: Preloads commonly accessed data to improve responsiveness.
  */
 export function warmCachesOnIdle(): void {
+  if (!isStartupAdmissionOpen()) return;
   try {
     log.debug('[Main] Starting idle cache warming...');
 

@@ -9,6 +9,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
+import { asType } from '../../../shared/typeUtils.js';
+import type * as CacheWarmer from './cacheWarmer.js';
+import type * as StartupAdmission from '../lifecycle/startupAdmission.js';
+import type * as IconCache from '../platform/iconCache.js';
 
 vi.mock('electron', () => ({
   app: {
@@ -211,5 +215,92 @@ describe('cacheWarmer', () => {
         'idle-cache-warming'
       );
     });
+  });
+});
+
+describe('cacheWarmer shutdown admission', () => {
+  let warmer: typeof CacheWarmer;
+  let admission: typeof StartupAdmission;
+  let monitor: typeof perfMonitor;
+  let icons: typeof IconCache;
+  const originalProfiling = process.env['ENABLE_CONFIG_PROFILING'];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    runPhaseMock.mockResolvedValue(undefined);
+    warmer = await import('./cacheWarmer.js');
+    admission = await import('../lifecycle/startupAdmission.js');
+    ({ perfMonitor: monitor } = await import('../lifecycle/performanceMonitor.js'));
+    icons = await import('../platform/iconCache.js');
+    process.env['ENABLE_CONFIG_PROFILING'] = 'true';
+  });
+
+  afterEach(() => {
+    icons.destroyIconCache();
+    if (originalProfiling === undefined) delete process.env['ENABLE_CONFIG_PROFILING'];
+    else process.env['ENABLE_CONFIG_PROFILING'] = originalProfiling;
+  });
+
+  it('guards all public warming/profiling entrypoints after admission closes', async () => {
+    const getMainWindow = vi.fn();
+    admission.closeStartupAdmission();
+    warmer.warmInitialIcons();
+    warmer.warmSoonDeferredIcons();
+    warmer.warmCachesOnIdle();
+    warmer.scheduleIdleCacheWarming();
+    warmer.runDevPostDeferred(true);
+    await warmer.runDeferredPhase({ context: {}, getMainWindow, isDev: true });
+
+    expect(nativeImage.createFromPath).not.toHaveBeenCalled();
+    expect(createTrackedTimeoutMock).not.toHaveBeenCalled();
+    expect(compareStorePerformanceMock).not.toHaveBeenCalled();
+    expect(runPhaseMock).not.toHaveBeenCalled();
+    expect(getMainWindow).not.toHaveBeenCalled();
+    expect(monitor.mark).not.toHaveBeenCalled();
+  });
+
+  it('does not mark, profile, notify, or schedule when admitted deferred work resumes after quit', async () => {
+    const held = Promise.withResolvers<void>();
+    runPhaseMock.mockImplementation(() => held.promise);
+    const deferred = warmer.runDeferredPhase({
+      context: {},
+      getMainWindow: () => asType<Electron.BrowserWindow>({}),
+      isDev: true,
+    });
+    expect(runPhaseMock).toHaveBeenCalledTimes(1);
+    admission.closeStartupAdmission();
+    held.resolve();
+    await deferred;
+
+    expect(monitor.mark).not.toHaveBeenCalledWith('all-features-loaded', expect.any(String), true);
+    expect(monitor.logSummary).not.toHaveBeenCalled();
+    expect(compareStorePerformanceMock).not.toHaveBeenCalled();
+    expect(notifyDeferredMock).not.toHaveBeenCalled();
+    expect(createTrackedTimeoutMock).not.toHaveBeenCalled();
+  });
+
+  it('does not warm when an already scheduled idle callback runs after quit', () => {
+    warmer.scheduleIdleCacheWarming();
+    const callback = createTrackedTimeoutMock.mock.calls[0]?.[0];
+    admission.closeStartupAdmission();
+    callback();
+    expect(nativeImage.createFromPath).not.toHaveBeenCalled();
+  });
+
+  it('preserves the original late deferred failure for its caller', async () => {
+    const held = Promise.withResolvers<void>();
+    runPhaseMock.mockImplementation(() => held.promise);
+    const deferred = warmer.runDeferredPhase({
+      context: {},
+      getMainWindow: () => asType<Electron.BrowserWindow>({}),
+      isDev: true,
+    });
+    const failure = new Error('late required deferred failure');
+    const observed = expect(deferred).rejects.toBe(failure);
+    admission.closeStartupAdmission();
+    held.reject(failure);
+    await observed;
+    expect(notifyDeferredMock).not.toHaveBeenCalled();
   });
 });
