@@ -6,16 +6,15 @@
 
 import { logger } from './logger.js';
 import { toErrorMessage } from './errorUtils.js';
-import type { EventHandler, EventTarget, CleanupConfig } from './cleanupTypes.js';
+import type {
+  EventHandler,
+  EventTarget,
+  CleanupConfig,
+  CleanupTask,
+  GlobalCleanupCallback,
+} from './cleanupTypes.js';
 
-/**
- * Cleanup task
- */
-interface CleanupTask {
-  name: string;
-  cleanup: () => void | Promise<void>;
-  critical?: boolean; // Whether failure should be logged as error
-}
+const timerRegistrations = new WeakMap<NodeJS.Timeout, () => void>();
 
 /**
  * Resource Cleanup Manager
@@ -34,10 +33,7 @@ export class ResourceCleanupManager {
   private readonly log = logger.feature('ResourceCleanup');
   private isCleaningUp = false;
   private cleanupPromise: Promise<void> | null = null;
-  private globalCleanupCallbacks = new Map<
-    string,
-    { cleanup: () => void | Promise<void>; label: string }
-  >();
+  private hooks = new Map<string, GlobalCleanupCallback>();
 
   /**
    * Register a cleanup task
@@ -75,6 +71,10 @@ export class ResourceCleanupManager {
     this.timeouts.delete(timeout);
   }
 
+  untrackInterval(interval: NodeJS.Timeout): void {
+    this.intervals.delete(interval);
+  }
+
   /**
    * Track an event listener for cleanup
    */
@@ -91,7 +91,7 @@ export class ResourceCleanupManager {
     cleanup: () => void | Promise<void>,
     label?: string
   ): void {
-    this.globalCleanupCallbacks.set(id, {
+    this.hooks.set(id, {
       cleanup,
       label: label ?? id,
     });
@@ -102,7 +102,7 @@ export class ResourceCleanupManager {
    * Get IDs of all registered global cleanup callbacks
    */
   getRegisteredCallbackIds(): string[] {
-    return Array.from(this.globalCleanupCallbacks.keys());
+    return Array.from(this.hooks.keys());
   }
 
   /**
@@ -124,16 +124,27 @@ export class ResourceCleanupManager {
   /**
    * Register a timer with the abort signal for fan-out cleanup
    */
-  registerTimerSignal(id: NodeJS.Timeout, kind: 'interval' | 'timeout', label?: string): void {
-    this.timerAborter.signal.addEventListener(
-      'abort',
-      () => {
-        if (kind === 'interval') clearInterval(id);
-        else clearTimeout(id);
-        this.log.debug(`Timer aborted: ${label ?? 'unnamed'}`);
-      },
-      { once: true }
-    );
+  registerTimerSignal(
+    id: NodeJS.Timeout,
+    kind: 'interval' | 'timeout',
+    label?: string
+  ): () => void {
+    const signal = this.timerAborter.signal;
+    const release = (): void => {
+      signal.removeEventListener('abort', abort);
+      timerRegistrations.delete(id);
+      if (kind === 'interval') this.untrackInterval(id);
+      else this.untrackTimeout(id);
+    };
+    const abort = (): void => {
+      release();
+      if (kind === 'interval') clearInterval(id);
+      else clearTimeout(id);
+      this.log.debug(`Timer aborted: ${label ?? 'unnamed'}`);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    timerRegistrations.set(id, release);
+    return release;
   }
 
   /**
@@ -168,7 +179,7 @@ export class ResourceCleanupManager {
     }
 
     this.isCleaningUp = true;
-    this.cleanupPromise = this.performCleanup(config);
+    this.cleanupPromise = this.run(config);
 
     try {
       await this.cleanupPromise;
@@ -181,7 +192,7 @@ export class ResourceCleanupManager {
   /**
    * Perform the actual cleanup
    */
-  private async performCleanup(config: CleanupConfig): Promise<void> {
+  private async run(config: CleanupConfig): Promise<void> {
     const startTime = Date.now();
     this.log.info('Starting resource cleanup...');
 
@@ -189,45 +200,11 @@ export class ResourceCleanupManager {
     this.cleanupTimers();
     this.cleanupListeners();
 
-    // Execute registered cleanup tasks
-    for (const task of this.tasks) {
-      try {
-        if (config.logDetails) {
-          this.log.debug(`Running cleanup task: ${task.name}`);
-        }
-        await task.cleanup();
-      } catch (error: unknown) {
-        if (task.critical) {
-          this.log.error(`Critical cleanup task failed: ${task.name}`, toErrorMessage(error));
-        } else {
-          this.log.debug(`Cleanup task failed: ${task.name}`, toErrorMessage(error));
-        }
-      }
-    }
-
-    // Clean up global resources if requested
-    if (config.includeGlobalResources) {
-      await this.cleanupGlobalResources();
-    }
-
-    const elapsed = Date.now() - startTime;
-    this.log.info(`Resource cleanup completed in ${elapsed}ms`);
-  }
-
-  /**
-   * Clean up global application resources
-   */
-  private async cleanupGlobalResources(): Promise<void> {
-    this.log.debug('Cleaning up global resources...');
-
-    for (const [_id, { cleanup, label }] of this.globalCleanupCallbacks) {
-      try {
-        await cleanup();
-        this.log.debug(`${label} cleaned up`);
-      } catch (error: unknown) {
-        this.log.debug(`Failed to cleanup ${label}:`, toErrorMessage(error));
-      }
-    }
+    const tasks = this.tasks;
+    const callbacks = this.hooks;
+    const context = { config, log: this.log, start: startTime };
+    const { run } = await import('./resourceCleanupTasks.js');
+    await run(tasks, callbacks, context);
   }
 
   /**
@@ -240,7 +217,7 @@ export class ResourceCleanupManager {
     this.timerAborter.abort();
     this.timerAborter = new AbortController();
     this.listeners = [];
-    this.globalCleanupCallbacks.clear();
+    this.hooks.clear();
     this.isCleaningUp = false;
     this.cleanupPromise = null;
   }
@@ -304,16 +281,26 @@ export function createTrackedTimeout(
 ): NodeJS.Timeout {
   const manager = getCleanupManager();
   const timeout: NodeJS.Timeout = setTimeout(() => {
-    manager.untrackTimeout(timeout);
+    release();
     callback();
   }, delay);
-  manager.registerTimerSignal(timeout, 'timeout', name);
+  const release = manager.registerTimerSignal(timeout, 'timeout', name);
 
   if (name) {
     logger.main.debug(`Created tracked timeout: ${name}`);
   }
 
   return timeout;
+}
+
+export function cancelTrackedTimeout(timeout: NodeJS.Timeout): void {
+  clearTimeout(timeout);
+  timerRegistrations.get(timeout)?.();
+}
+
+export function cancelTrackedInterval(interval: NodeJS.Timeout): void {
+  clearInterval(interval);
+  timerRegistrations.get(interval)?.();
 }
 
 /**

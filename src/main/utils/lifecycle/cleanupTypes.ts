@@ -4,6 +4,24 @@
  * Extracted to break circular dependency between resourceCleanup.ts and trackedResources.ts.
  */
 import type { BrowserWindow } from 'electron';
+import type { ScopedLogger } from './logger.js';
+
+export interface CleanupTask {
+  readonly name: string;
+  readonly cleanup: () => void | Promise<void>;
+  readonly critical?: boolean;
+}
+
+export interface GlobalCleanupCallback {
+  readonly cleanup: () => void | Promise<void>;
+  readonly label: string;
+}
+
+export interface CleanupRunContext {
+  readonly config: CleanupConfig;
+  readonly log: ScopedLogger;
+  readonly start: number;
+}
 
 /**
  * Type for event handler functions
