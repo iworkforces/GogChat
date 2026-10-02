@@ -32,6 +32,7 @@ const { mockCreateTrackedTimeout, mockCreateTrackedInterval } = vi.hoisted(() =>
 }));
 
 vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
+  cancelTrackedInterval: (handle: NodeJS.Timeout) => clearInterval(handle),
   createTrackedTimeout: mockCreateTrackedTimeout,
   createTrackedInterval: mockCreateTrackedInterval,
 }));

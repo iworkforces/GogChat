@@ -7,7 +7,11 @@ import { app } from 'electron';
 import { setUpdateNotification, checkForUpdates } from 'electron-update-notifier';
 import log from 'electron-log';
 import { configGet } from '../config.js';
-import { createTrackedInterval, createTrackedTimeout } from '../utils/lifecycle/resourceCleanup.js';
+import {
+  cancelTrackedInterval,
+  createTrackedInterval,
+  createTrackedTimeout,
+} from '../utils/lifecycle/resourceCleanup.js';
 import { getPackageInfo } from '../utils/platform/packageInfo.js';
 import {
   beginUpdateDialogSession,
@@ -306,7 +310,7 @@ export async function checkForUpdatesManual(): Promise<void> {
 }
 
 export default () => {
-  if (interval) clearInterval(interval);
+  if (interval) cancelTrackedInterval(interval);
 
   const shouldCheckForUpdates = () => {
     return configGet('app.autoCheckForUpdates');
