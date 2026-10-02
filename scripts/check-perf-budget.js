@@ -37,6 +37,30 @@ const repoRoot = path.resolve(__dirname, '..');
 /** Must match PERF_EXPORT_SCHEMA_VERSION in performanceTypes.ts */
 export const PERF_EXPORT_SCHEMA_VERSION = 1;
 
+const REQUIRED_STARTUP_MARKERS = [
+  'app-start',
+  'app-ready',
+  'account-0-ready',
+  'account-0-content-loaded',
+  'features-loaded',
+  'all-features-loaded',
+];
+
+const GATED_MARKER_PAIRS = [
+  ['app-start', 'all-features-loaded'],
+  ['app-ready', 'account-0-ready'],
+  ['app-ready', 'features-loaded'],
+  ['app-ready', 'account-0-content-loaded'],
+];
+
+function isNonnegativeFinite(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Budget definitions
 // ---------------------------------------------------------------------------
@@ -303,12 +327,12 @@ function formatValue(value, unit) {
 }
 
 /**
- * Validate schema version + unit metadata before comparing budgets.
+ * Validate capture evidence and gated operands before comparing budgets.
  * @returns {{ ok: boolean, errors: string[] }}
  */
 export function validateMetricsContract(metrics) {
   const errors = [];
-  if (!metrics || typeof metrics !== 'object') {
+  if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) {
     return { ok: false, errors: ['metrics is not an object'] };
   }
   if (metrics.schemaVersion !== PERF_EXPORT_SCHEMA_VERSION) {
@@ -322,15 +346,102 @@ export function validateMetricsContract(metrics) {
   if (metrics.units?.time !== 'ms') {
     errors.push(`units.time must be "ms" (got ${metrics.units?.time})`);
   }
-  if (metrics.capture && metrics.capture.valid === false) {
-    errors.push(
-      `capture.valid is false${metrics.capture.reason ? `: ${metrics.capture.reason}` : ''}`
-    );
+  const capture = metrics.capture;
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
+    errors.push('capture completeness metadata must be an object');
+  } else {
+    if (capture.complete !== true) errors.push('capture.complete must be true');
+    if (capture.valid !== true) {
+      errors.push(`capture.valid must be true${capture.reason ? `: ${capture.reason}` : ''}`);
+    }
+    if (
+      !Array.isArray(capture.requiredMarkers) ||
+      capture.requiredMarkers.length !== REQUIRED_STARTUP_MARKERS.length ||
+      new Set(capture.requiredMarkers).size !== REQUIRED_STARTUP_MARKERS.length ||
+      !REQUIRED_STARTUP_MARKERS.every((name) => capture.requiredMarkers.includes(name))
+    ) {
+      errors.push(
+        'capture.requiredMarkers must contain each canonical startup marker exactly once'
+      );
+    }
+    if (!Array.isArray(capture.missingMarkers) || capture.missingMarkers.length !== 0) {
+      errors.push('capture.missingMarkers must be an empty array for a valid capture');
+    }
+    if (!isPositiveInteger(capture.rendererSampleCount)) {
+      errors.push('capture.rendererSampleCount must be a positive integer');
+    }
   }
-  // Empty renderer evidence must not pass as measured zero for gated rendererCount.
+
+  const aggregation = metrics.aggregation;
+  if (Object.hasOwn(metrics, 'aggregation')) {
+    if (!aggregation || typeof aggregation !== 'object' || Array.isArray(aggregation)) {
+      errors.push('aggregation must be an object when present');
+    } else {
+      if (aggregation.strategy !== 'single' && aggregation.strategy !== 'median') {
+        errors.push('aggregation.strategy must be single or median');
+      }
+      if (aggregation.complete !== true) errors.push('aggregation.complete must be true');
+      for (const field of ['runs', 'successfulRuns']) {
+        if (!isPositiveInteger(aggregation[field])) {
+          errors.push(`aggregation.${field} must be a positive integer`);
+        }
+      }
+      if (aggregation.runs !== aggregation.successfulRuns) {
+        errors.push('aggregation.runs must equal aggregation.successfulRuns');
+      }
+      if (aggregation.invalidRuns !== 0) errors.push('aggregation.invalidRuns must be 0');
+      if (aggregation.strategy === 'single' && aggregation.runs !== 1) {
+        errors.push('aggregation.single must describe exactly one run');
+      }
+      if (aggregation.strategy === 'median' && aggregation.runs < 2) {
+        errors.push('aggregation.median must describe at least two runs');
+      }
+    }
+  }
+
+  for (const name of REQUIRED_STARTUP_MARKERS) {
+    if (!isNonnegativeFinite(metrics.markers?.[name])) {
+      errors.push(`markers.${name} must be a finite nonnegative number`);
+    }
+  }
+  for (const [from, to] of GATED_MARKER_PAIRS) {
+    const start = metrics.markers?.[from];
+    const end = metrics.markers?.[to];
+    if (isNonnegativeFinite(start) && isNonnegativeFinite(end) && end < start) {
+      errors.push(`markers.${to} must be >= markers.${from}`);
+    }
+  }
+  if (!isNonnegativeFinite(lastMemoryField(metrics, 'heapUsed'))) {
+    errors.push('memorySnapshots[last].heapUsed must be a finite nonnegative number (MB)');
+  }
+
   const snaps = metrics.rendererSnapshots;
-  if (!Array.isArray(snaps) || snaps.filter((s) => s?.type === 'renderer').length === 0) {
+  const rendererRows = Array.isArray(snaps) ? snaps.filter((s) => s?.type === 'renderer') : [];
+  if (rendererRows.length === 0) {
     errors.push('empty renderer evidence (no renderer-type samples)');
+  }
+  if (aggregation?.strategy !== 'median' && capture?.rendererSampleCount !== rendererRows.length) {
+    errors.push('capture.rendererSampleCount must equal the number of renderer-type rows');
+  }
+  for (const [index, row] of rendererRows.entries()) {
+    const fieldPath = `rendererSnapshots[renderer ${index}]`;
+    if (!isPositiveInteger(row.pid)) errors.push(`${fieldPath}.pid must be a positive integer`);
+    for (const field of ['timestamp', 'cpuPercent']) {
+      if (!isNonnegativeFinite(row[field])) {
+        errors.push(`${fieldPath}.${field} must be a finite nonnegative number`);
+      }
+    }
+    if (Object.hasOwn(row, 'creationTime') && !isNonnegativeFinite(row.creationTime)) {
+      errors.push(`${fieldPath}.creationTime must be a finite nonnegative number when present`);
+    }
+    for (const field of ['residentSet', 'peakResidentSet']) {
+      if (!isNonnegativeFinite(row.memory?.[field])) {
+        errors.push(`${fieldPath}.memory.${field} must be a finite nonnegative number (MB)`);
+      }
+    }
+    if (row.memory?.private !== null && !isNonnegativeFinite(row.memory?.private)) {
+      errors.push(`${fieldPath}.memory.private must be null or a finite nonnegative number (MB)`);
+    }
   }
   return { ok: errors.length === 0, errors };
 }
@@ -341,40 +452,40 @@ export function validateMetricsContract(metrics) {
  */
 export function evaluateBudgets(metrics, options = {}) {
   const contract = validateMetricsContract(metrics);
-  const results = BUDGETS.map((spec) => {
+  const measurements = BUDGETS.map((spec) => {
     let actual = null;
     try {
-      actual = spec.extract(metrics);
+      if (contract.ok) actual = spec.extract(metrics);
     } catch (err) {
       if (!options.silent) {
         process.stderr.write(`[perf-budget] extractor "${spec.name}" threw: ${err.message}\n`);
       }
     }
 
+    if (spec.gated && actual != null && !isNonnegativeFinite(actual)) {
+      contract.errors.push(`${spec.name} must be a finite nonnegative measurement (${spec.unit})`);
+    }
+
+    return { ...spec, actual };
+  });
+  contract.ok = contract.errors.length === 0;
+
+  const results = measurements.map((measurement) => {
+    const { actual, gated, budget } = measurement;
     let status;
-    if (actual == null) {
+    if (gated && !contract.ok) {
+      status = 'FAIL';
+    } else if (actual == null) {
       // Missing gated metrics FAIL; warn-only stay non-blocking WARN/SKIP.
-      status = spec.gated ? 'FAIL' : 'SKIP';
-    } else if (actual <= spec.budget) {
+      status = gated ? 'FAIL' : 'SKIP';
+    } else if (actual <= budget) {
       status = 'PASS';
     } else {
-      status = spec.gated ? 'FAIL' : 'WARN';
+      status = gated ? 'FAIL' : 'WARN';
     }
 
-    return { ...spec, actual, status };
+    return { ...measurement, status };
   });
-
-  // If the contract is invalid, force every gated metric to FAIL so CI never
-  // silently accepts incomplete or unit-mismatched artifacts.
-  if (!contract.ok) {
-    for (const r of results) {
-      if (r.gated && r.status === 'PASS') {
-        r.status = 'FAIL';
-      } else if (r.gated && r.status === 'SKIP') {
-        r.status = 'FAIL';
-      }
-    }
-  }
 
   const failed = results.filter((r) => r.status === 'FAIL').length;
   const warned = results.filter((r) => r.status === 'WARN').length;
@@ -482,10 +593,15 @@ export function main(argv = process.argv.slice(2)) {
     return 1;
   }
 
+  const { results, failed, warned, skipped, contractErrors } = evaluateBudgets(metrics);
+  if (contractErrors.length > 0) {
+    for (const error of contractErrors) annotate('error', `Perf contract — ${error}`);
+    process.exitCode = 1;
+    return 1;
+  }
+
   const baseline = loadBaseline();
   const baselineMetrics = baseline?.metrics || {};
-
-  const { results, failed, warned, skipped, contractErrors } = evaluateBudgets(metrics);
   for (const r of results) {
     r.baseline = baselineMetrics[r.name] ?? null;
   }
@@ -497,13 +613,6 @@ export function main(argv = process.argv.slice(2)) {
   process.stdout.write('\n');
   process.stdout.write('Performance Budget Report\n');
   process.stdout.write('=========================\n');
-  if (contractErrors.length > 0) {
-    process.stdout.write(`Contract errors:\n`);
-    for (const e of contractErrors) {
-      process.stdout.write(`  - ${e}\n`);
-      annotate('error', `Perf contract — ${e}`);
-    }
-  }
   process.stdout.write(
     `${pad('METRIC', COL.name)}${pad('STATE', COL.status)}${pad('ACTUAL', COL.actual)}` +
       `${pad('BUDGET', COL.budget)}${pad('USED', COL.util)}${pad('Δ vs BASE', COL.delta)}\n`
@@ -549,11 +658,10 @@ export function main(argv = process.argv.slice(2)) {
   writeHistory(results);
   maybeUpdateBaseline(results, metrics);
 
-  const exitFailed = failed > 0 || contractErrors.length > 0 ? 1 : 0;
+  const exitFailed = failed > 0 ? 1 : 0;
   process.stdout.write(
     `Summary: ${results.filter((r) => r.status === 'PASS').length} pass, ` +
-      `${failed} fail, ${warned} warn, ${skipped} skip` +
-      `${contractErrors.length ? `, ${contractErrors.length} contract error(s)` : ''}\n`
+      `${failed} fail, ${warned} warn, ${skipped} skip\n`
   );
 
   process.exitCode = exitFailed;
