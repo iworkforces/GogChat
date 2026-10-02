@@ -15,7 +15,7 @@ import { Notification } from 'electron';
 import log from 'electron-log';
 import { BADGE, TIMING } from '../../../shared/constants.js';
 import type { AccountIndex } from '../../../shared/types/branded.js';
-import { createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 import { focusNotificationSource } from './notificationFocus.js';
 import {
   UNREAD_DELTA_TAG_BASE,
@@ -182,7 +182,7 @@ export function showNativeNotification(
     notification.on('close', () => {
       const entry = activeNotifications.get(trackingKey);
       if (entry && entry.notification === notification) {
-        clearTimeout(entry.timeout);
+        cancelTrackedTimeout(entry.timeout);
         activeNotifications.delete(trackingKey);
       }
       log.debug('[NativeNotification] Notification closed:', payload.title);
@@ -191,7 +191,7 @@ export function showNativeNotification(
     if (payload.tag) {
       const existing = activeNotifications.get(trackingKey);
       if (existing) {
-        clearTimeout(existing.timeout);
+        cancelTrackedTimeout(existing.timeout);
         activeNotifications.delete(trackingKey);
         try {
           existing.notification.close();
@@ -234,7 +234,7 @@ export function showNativeNotification(
  */
 export function cleanupActiveNativeNotifications(): void {
   activeNotifications.forEach((entry) => {
-    clearTimeout(entry.timeout);
+    cancelTrackedTimeout(entry.timeout);
     try {
       entry.notification.close();
     } catch {
