@@ -48,6 +48,7 @@ vi.mock('../../../src/shared/urlValidators.js', () => ({
 
 // ── resourceCleanup stub ─────────────────────────────────────────────────────
 vi.mock('../../../src/main/utils/lifecycle/resourceCleanup', () => ({
+  cancelTrackedInterval: (handle: NodeJS.Timeout) => clearInterval(handle),
   createTrackedInterval: (cb: () => void, ms: number) => setInterval(cb, ms),
 }));
 

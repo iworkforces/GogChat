@@ -7,7 +7,10 @@ import {
   isWhitelistedHost,
   isGoogleAuthUrl,
 } from '../../shared/urlValidators.js';
-import { createTrackedInterval } from '../utils/lifecycle/resourceCleanup.js';
+import {
+  cancelTrackedInterval,
+  createTrackedInterval,
+} from '../utils/lifecycle/resourceCleanup.js';
 import { watchBootstrapAccount } from '../utils/account/bootstrapWatcher.js';
 import { asAccountIndex } from '../../shared/types/branded.js';
 import {
@@ -304,7 +307,7 @@ const logGuardStatus = () => {
 
 const stopReGuardTimer = () => {
   if (interval) {
-    clearInterval(interval);
+    cancelTrackedInterval(interval);
     interval = null;
   }
 };
