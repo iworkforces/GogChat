@@ -38,7 +38,7 @@ import {
   flushAccountWindowsWrites as _flushAccountWindowsWrites,
   readAccountWindowState as _getAccountWindowState,
 } from './accountWindowsStore.js';
-import { createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 import { getAccountViewManager, resetAccountViewManagerSingleton } from './accountViewManager.js';
 import {
   notifyAccountWebContentsCreated,
@@ -693,7 +693,7 @@ export class AccountWindowManager implements IAccountWindowManager {
     if (!timer) {
       return;
     }
-    clearTimeout(timer);
+    cancelTrackedTimeout(timer);
     this.dehydrateTimers.delete(accountIndex);
   }
 }
