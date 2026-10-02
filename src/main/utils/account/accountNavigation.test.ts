@@ -15,6 +15,7 @@ vi.mock('../../../shared/urlValidators.js', () => ({
 }));
 
 import { isGoogleAuthUrl } from '../../../shared/urlValidators.js';
+import * as navigation from './accountNavigation.js';
 
 function makeManager(
   wc: {
@@ -26,6 +27,7 @@ function makeManager(
 ): IAccountWindowManager {
   return {
     getAccountWebContents: vi.fn().mockReturnValue(wc),
+    isDehydrated: vi.fn().mockReturnValue(false),
   } as unknown as IAccountWindowManager;
 }
 
@@ -36,6 +38,45 @@ describe('accountNavigation', () => {
   });
 
   describe('loadAccountURL', () => {
+    it('consumes a rejected synchronous load without changing its boolean contract', async () => {
+      const manager = makeManager({
+        isDestroyed: () => false,
+        getURL: () => 'https://chat.google.com/u/0',
+        loadURL: vi.fn().mockRejectedValue(new Error('ERR_ABORTED')),
+        send: vi.fn(),
+      });
+      expect(loadAccountURL(manager, asAccountIndex(0), 'file:///offline')).toBe(true);
+      await Promise.resolve();
+      const log = await import('electron-log');
+      expect(log.default.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses parked content at both navigation boundaries without hydrating', async () => {
+      const loadURL = vi.fn();
+      const manager = makeManager({
+        isDestroyed: () => false,
+        getURL: () => '',
+        loadURL,
+        send: vi.fn(),
+      });
+      vi.mocked(manager.isDehydrated).mockReturnValue(true);
+      expect(loadAccountURL(manager, asAccountIndex(0), 'file:///offline')).toBe(false);
+      expect(
+        await navigation.loadAccountURLAndWait(manager, asAccountIndex(0), 'file:///offline')
+      ).toBe(false);
+      expect(loadURL).not.toHaveBeenCalled();
+    });
+    it('reports rejected navigation as false through the awaitable boundary', async () => {
+      const manager = makeManager({
+        isDestroyed: () => false,
+        getURL: () => 'https://chat.google.com/u/0',
+        loadURL: vi.fn().mockRejectedValue(new Error('ERR_ABORTED')),
+        send: vi.fn(),
+      });
+      expect(
+        await navigation.loadAccountURLAndWait(manager, asAccountIndex(0), 'file:///offline')
+      ).toBe(false);
+    });
     it('loads URL on live WebContents', () => {
       const loadURL = vi.fn().mockResolvedValue(undefined);
       const manager = makeManager({

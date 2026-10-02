@@ -8,6 +8,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
+import { pathToFileURL } from 'node:url';
+import { asType } from '../../shared/typeUtils.js';
+import type { IAccountWindowManager } from '../../shared/types/window.js';
 
 // ─── Fake BrowserWindow ───────────────────────────────────────────────────────
 
@@ -60,10 +63,12 @@ function makeFakeWindow(url = '') {
     getURL: () => string;
     send: ReturnType<typeof vi.fn>;
     loadURL: ReturnType<typeof vi.fn>;
+    isDestroyed: () => boolean;
   };
   wc.getURL = vi.fn(() => url);
   wc.send = vi.fn();
   wc.loadURL = vi.fn().mockResolvedValue(undefined);
+  wc.isDestroyed = () => false;
 
   const win = new EventEmitter() as unknown as Electron.BrowserWindow & {
     webContents: typeof wc;
@@ -79,6 +84,14 @@ function makeFakeWindow(url = '') {
   return win;
 }
 
+function makeAccountManager(win: ReturnType<typeof makeFakeWindow>) {
+  return asType<IAccountWindowManager>({
+    getAccountWebContents: vi.fn(() => win.webContents),
+    isDehydrated: vi.fn(() => false),
+    focusAccount: vi.fn(),
+  });
+}
+
 // ─── Mock electron ────────────────────────────────────────────────────────────
 
 vi.mock('electron', () => ({
@@ -87,11 +100,12 @@ vi.mock('electron', () => ({
     getAppPath: vi.fn().mockReturnValue('/Applications/GogChat.app'),
   },
   BrowserWindow: vi.fn(),
-  Notification: vi.fn().mockImplementation(() => ({
-    show: vi.fn(),
-    on: vi.fn(),
-    close: vi.fn(),
-  })),
+  Notification: vi.fn().mockImplementation(function () {
+    return Object.assign(new EventEmitter(), {
+      show: vi.fn(),
+      close: vi.fn(),
+    });
+  }),
   ipcMain: {
     on: vi.fn(),
     removeListener: vi.fn(),
@@ -220,7 +234,7 @@ describe('inOnline feature', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
       const win = makeFakeWindow('https://mail.google.com/chat/u/0');
       const mod = await import('./inOnline.js');
-      await mod.checkForInternet(win as unknown as Electron.BrowserWindow);
+      await mod.checkForInternet(makeAccountManager(win));
       expect(win.webContents.loadURL).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     });
@@ -229,8 +243,12 @@ describe('inOnline feature', () => {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
       const win = makeFakeWindow('https://mail.google.com/chat/u/0');
       const mod = await import('./inOnline.js');
-      await mod.checkForInternet(win as unknown as Electron.BrowserWindow);
-      expect(win.loadURL).toHaveBeenCalled();
+      await mod.checkForInternet(makeAccountManager(win));
+      expect(win.webContents.loadURL).toHaveBeenCalledWith(
+        'file:///Applications/GogChat.app/lib/offline/index.html'
+      );
+      expect(win.loadURL).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(2);
       vi.unstubAllGlobals();
     });
 
@@ -242,8 +260,10 @@ describe('inOnline feature', () => {
       vi.stubGlobal('fetch', fetchMock);
       const win = makeFakeWindow('https://mail.google.com/chat/u/0');
       const mod = await import('./inOnline.js');
-      await mod.checkForInternet(win as unknown as Electron.BrowserWindow);
+      await mod.checkForInternet(makeAccountManager(win));
       expect(win.loadURL).not.toHaveBeenCalled();
+      const { Notification } = await import('electron');
+      expect(Notification).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     });
 
@@ -253,10 +273,350 @@ describe('inOnline feature', () => {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
       const win = makeFakeWindow('https://mail.google.com/chat/u/0');
       const mod = await import('./inOnline.js');
-      await mod.checkForInternet(win as unknown as Electron.BrowserWindow);
+      await mod.checkForInternet(makeAccountManager(win));
       expect(win.loadURL).not.toHaveBeenCalled();
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+      const { Notification } = await import('electron');
+      expect(Notification).toHaveBeenCalledTimes(1);
       vi.unstubAllGlobals();
     });
+  });
+
+  describe('initial document ownership', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('makes a same-URL navigation during the startup delay permanently inert', async () => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+      vi.stubGlobal('fetch', fetchMock);
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(makeAccountManager(win));
+      win.webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        url: win.webContents.getURL(),
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+      dispose();
+    });
+
+    it.each(['destroy', 'replacement', 'dehydrate', 'shutdown'])(
+      'never rearms when %s invalidates the pre-delay account',
+      async (race) => {
+        vi.useFakeTimers();
+        const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+        vi.stubGlobal('fetch', fetchMock);
+        const win = makeFakeWindow('https://chat.google.com/u/0');
+        const manager = makeAccountManager(win);
+        const mod = await import('./inOnline.js');
+        const dispose = mod.scheduleInitialConnectivity(manager);
+        if (race === 'destroy') win.webContents.emit('destroyed');
+        if (race === 'replacement')
+          vi.mocked(manager.getAccountWebContents).mockReturnValue(makeFakeWindow().webContents);
+        if (race === 'dehydrate') vi.mocked(manager.isDehydrated).mockReturnValue(true);
+        if (race === 'shutdown') dispose();
+        await vi.advanceTimersByTimeAsync(3000);
+        vi.mocked(manager.getAccountWebContents).mockReturnValue(win.webContents);
+        vi.mocked(manager.isDehydrated).mockReturnValue(false);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(win.webContents.loadURL).not.toHaveBeenCalled();
+        dispose();
+      }
+    );
+
+    it('discards a pending fallback load when a competing same-URL navigation begins', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      let finishLoad = () => {};
+      vi.mocked(win.webContents.loadURL).mockImplementation((url: string) => {
+        win.webContents.emit('did-start-navigation', { isMainFrame: true, url });
+        return new Promise<void>((resolve) => {
+          finishLoad = resolve;
+        });
+      });
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(makeAccountManager(win));
+      await vi.advanceTimersByTimeAsync(3000);
+      win.webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        url: 'file:///Applications/GogChat.app/lib/offline/index.html',
+      });
+      finishLoad();
+      await vi.advanceTimersByTimeAsync(0);
+      const { Notification } = await import('electron');
+      expect(Notification).not.toHaveBeenCalled();
+      expect(win.webContents.loadURL).toHaveBeenCalledTimes(1);
+      dispose();
+    });
+
+    it('ignores subframe navigation while preserving initial account document ownership', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(makeAccountManager(win));
+      win.webContents.emit('did-start-navigation', { isMainFrame: false, url: 'about:blank' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(win.webContents.loadURL).toHaveBeenCalledTimes(1);
+      dispose();
+    });
+
+    it.each(['navigation', 'same-url', 'destroy', 'replacement', 'dehydrate', 'shutdown'])(
+      'discards a pending probe on %s',
+      async (race) => {
+        vi.useFakeTimers();
+        let resolveProbe: (value: { ok: boolean }) => void = () => {};
+        let signal: AbortSignal | undefined;
+        const fetchMock = vi.fn((_url: string, options: { signal: AbortSignal }) => {
+          signal = options.signal;
+          return new Promise<{ ok: boolean }>((resolve) => {
+            resolveProbe = resolve;
+          });
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const win = makeFakeWindow('https://chat.google.com/u/0');
+        const manager = makeAccountManager(win);
+        const mod = await import('./inOnline.js');
+        const dispose = mod.scheduleInitialConnectivity(manager);
+        await vi.advanceTimersByTimeAsync(3000);
+        if (race === 'navigation' || race === 'same-url') {
+          win.webContents.emit('did-start-navigation', {
+            isMainFrame: true,
+            url:
+              race === 'same-url' ? win.webContents.getURL() : 'https://accounts.google.com/signin',
+          });
+        } else if (race === 'destroy') {
+          win.webContents.emit('destroyed');
+        } else if (race === 'replacement') {
+          vi.mocked(manager.getAccountWebContents).mockReturnValue(makeFakeWindow().webContents);
+        } else if (race === 'dehydrate') {
+          vi.mocked(manager.isDehydrated).mockReturnValue(true);
+        } else {
+          dispose();
+        }
+        resolveProbe({ ok: false });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(win.webContents.loadURL).not.toHaveBeenCalled();
+        if (race !== 'replacement' && race !== 'dehydrate') expect(signal?.aborted).toBe(true);
+        dispose();
+      }
+    );
+
+    it('aborts a navigation during the confirmation probe without routing or notifying', async () => {
+      vi.useFakeTimers();
+      let resolveProbe: (value: { ok: boolean }) => void = () => {};
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false })
+        .mockImplementationOnce((_url: string, options: { signal: AbortSignal }) => {
+          signal = options.signal;
+          return new Promise<{ ok: boolean }>((resolve) => {
+            resolveProbe = resolve;
+          });
+        });
+      vi.stubGlobal('fetch', fetchMock);
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(makeAccountManager(win));
+      await vi.advanceTimersByTimeAsync(3000);
+      win.webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        url: win.webContents.getURL(),
+      });
+      resolveProbe({ ok: false });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signal?.aborted).toBe(true);
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+      const { Notification } = await import('electron');
+      expect(Notification).not.toHaveBeenCalled();
+      dispose();
+    });
+
+    it.each(['replacement', 'dehydrate', 'shutdown', 'destroy', 'navigation'])(
+      'disposes owned notification and makes captured clicks inert after %s',
+      async (race) => {
+        vi.useFakeTimers();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+        const win = makeFakeWindow('https://chat.google.com/u/0');
+        const manager = makeAccountManager(win);
+        const mod = await import('./inOnline.js');
+        const dispose = mod.scheduleInitialConnectivity(manager);
+        await vi.advanceTimersByTimeAsync(3000);
+        const { Notification } = await import('electron');
+        const banner = vi.mocked(Notification).mock.results.at(-1)?.value;
+        const oldClick = banner.listeners('click')[0];
+        if (race === 'replacement')
+          vi.mocked(manager.getAccountWebContents).mockReturnValue(makeFakeWindow().webContents);
+        if (race === 'dehydrate') vi.mocked(manager.isDehydrated).mockReturnValue(true);
+        if (race === 'shutdown') dispose();
+        if (race === 'destroy') win.webContents.emit('destroyed');
+        if (race === 'navigation')
+          win.webContents.emit('did-start-navigation', {
+            isMainFrame: true,
+            url: 'https://chat.google.com/u/0',
+          });
+        oldClick();
+        expect(manager.focusAccount).not.toHaveBeenCalled();
+        expect(banner.close).toHaveBeenCalledTimes(1);
+        expect(banner.listenerCount('click')).toBe(0);
+        expect(win.webContents.listenerCount('did-start-navigation')).toBe(0);
+        dispose();
+      }
+    );
+
+    it.each(['missing', 'dehydrated', 'destroyed'])(
+      'never probes unavailable %s content',
+      async (state) => {
+        vi.useFakeTimers();
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+        const win = makeFakeWindow();
+        const manager = makeAccountManager(win);
+        if (state === 'missing') vi.mocked(manager.getAccountWebContents).mockReturnValue(null);
+        if (state === 'dehydrated') vi.mocked(manager.isDehydrated).mockReturnValue(true);
+        if (state === 'destroyed') win.webContents.isDestroyed = () => true;
+        const mod = await import('./inOnline.js');
+        const dispose = mod.scheduleInitialConnectivity(manager);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(manager.focusAccount).not.toHaveBeenCalled();
+        dispose();
+      }
+    );
+
+    it.each(['/Applications/Gog Chat.app', '/Applications/Gog Chat #?%.app'])(
+      'retains one notification when its own file navigation is normalized under %s',
+      async (appPath) => {
+        vi.useFakeTimers();
+        const { app, Notification } = await import('electron');
+        vi.spyOn(app, 'getAppPath').mockReturnValue(appPath);
+        const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+        vi.stubGlobal('fetch', fetchMock);
+        const canonicalTarget = pathToFileURL(`${appPath}/lib/offline/index.html`).href;
+        const win = makeFakeWindow('https://chat.google.com/u/0');
+        vi.mocked(win.webContents.loadURL).mockImplementation(async () => {
+          win.webContents.emit('did-start-navigation', {
+            isMainFrame: true,
+            url: canonicalTarget,
+          });
+        });
+        const mod = await import('./inOnline.js');
+        const dispose = mod.scheduleInitialConnectivity(makeAccountManager(win));
+        try {
+          await vi.advanceTimersByTimeAsync(3000);
+
+          expect(Notification).toHaveBeenCalledTimes(1);
+          const banner = asType<Electron.Notification>(
+            vi.mocked(Notification).mock.results[0]?.value
+          );
+          expect(banner.show).toHaveBeenCalledTimes(1);
+          expect(win.webContents.loadURL).toHaveBeenCalledWith(canonicalTarget);
+          expect(win.loadURL).not.toHaveBeenCalled();
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        } finally {
+          dispose();
+        }
+      }
+    );
+
+    it('invalidates normalized file ownership when a same-URL competitor starts', async () => {
+      vi.useFakeTimers();
+      const { app, Notification } = await import('electron');
+      const appPath = '/Applications/Gog Chat #?%.app';
+      vi.spyOn(app, 'getAppPath').mockReturnValue(appPath);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+      const canonicalTarget = pathToFileURL(`${appPath}/lib/offline/index.html`).href;
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const manager = makeAccountManager(win);
+      vi.mocked(win.webContents.loadURL).mockImplementation(async () => {
+        win.webContents.emit('did-start-navigation', {
+          isMainFrame: true,
+          url: canonicalTarget,
+        });
+      });
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(manager);
+      try {
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(Notification).toHaveBeenCalledTimes(1);
+        const banner = asType<Electron.Notification>(
+          vi.mocked(Notification).mock.results[0]?.value
+        );
+        const capturedClicks = banner.listeners('click');
+        expect(capturedClicks).toHaveLength(1);
+
+        win.webContents.emit('did-start-navigation', {
+          isMainFrame: true,
+          url: canonicalTarget,
+        });
+        for (const click of capturedClicks) click();
+
+        expect(manager.focusAccount).not.toHaveBeenCalled();
+        expect(banner.close).toHaveBeenCalledTimes(1);
+        expect(banner.listenerCount('click')).toBe(0);
+        expect(win.webContents.listenerCount('did-start-navigation')).toBe(0);
+      } finally {
+        dispose();
+      }
+    });
+
+    it('transfers ownership to its own navigation then closes the banner on a same-URL competitor', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const manager = makeAccountManager(win);
+      vi.mocked(win.webContents.loadURL).mockImplementation(async (url: string) => {
+        win.webContents.emit('did-start-navigation', { isMainFrame: true, url });
+      });
+      const mod = await import('./inOnline.js');
+      const dispose = mod.scheduleInitialConnectivity(manager);
+      await vi.advanceTimersByTimeAsync(3000);
+      const { Notification } = await import('electron');
+      const banner = vi.mocked(Notification).mock.results.at(-1)?.value;
+      expect(banner.show).toHaveBeenCalledTimes(1);
+      const oldClick = banner.listeners('click')[0];
+      oldClick();
+      expect(manager.focusAccount).toHaveBeenCalledWith(0);
+      win.webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        url: 'file:///Applications/GogChat.app/lib/offline/index.html',
+      });
+      oldClick();
+      expect(manager.focusAccount).toHaveBeenCalledTimes(1);
+      expect(banner.close).toHaveBeenCalled();
+      expect(banner.listenerCount('click')).toBe(0);
+      dispose();
+    });
+
+    it.each(['auth', 'reject', 'throw'])(
+      'does not notify after a %s routing refusal',
+      async (state) => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+        const win = makeFakeWindow(
+          state === 'auth' ? 'https://accounts.google.com/signin' : 'https://chat.google.com/u/0'
+        );
+        if (state === 'reject')
+          vi.mocked(win.webContents.loadURL).mockRejectedValue(new Error('ERR_ABORTED'));
+        if (state === 'throw')
+          vi.mocked(win.webContents.loadURL).mockImplementation(() => {
+            throw new Error('gone');
+          });
+        const mod = await import('./inOnline.js');
+        await mod.checkForInternet(makeAccountManager(win));
+        const { Notification } = await import('electron');
+        expect(Notification).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('IPC handler replies', () => {

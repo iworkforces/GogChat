@@ -218,19 +218,6 @@ vi.mock('./bootstrapTracker.js', () => ({
   }),
 }));
 
-vi.mock('../lifecycle/resourceCleanup.js', () => ({
-  createTrackedTimeout: vi.fn(
-    (callback: () => void, delay: number, name?: string): NodeJS.Timeout => {
-      const id = setTimeout(callback, delay);
-      h.trackedTimers.push({ id, callback, delay, name });
-      return id;
-    }
-  ),
-  createTrackedInterval: vi.fn((callback: () => void, delay: number): NodeJS.Timeout =>
-    setInterval(callback, delay)
-  ),
-}));
-
 vi.mock('./accountSessionMaintenance.js', () => ({
   startSessionMaintenance: vi.fn(),
   stopSessionMaintenance: vi.fn(),
@@ -300,6 +287,9 @@ import { asAccountIndex, asWebContentsId, toPartition } from '../../../shared/ty
 import type { WindowFactory } from '../../../shared/types/window';
 import { asType } from '../../../shared/typeUtils.js';
 import * as accountHooks from './accountWebContentsHooks.js';
+import { getEventListeners } from 'node:events';
+import { getCleanupManager } from '../lifecycle/resourceCleanup.js';
+import * as resourceCleanup from '../lifecycle/resourceCleanup.js';
 import { startSessionMaintenance, stopSessionMaintenance } from './accountSessionMaintenance.js';
 import { getAccountViewManager, resetAccountViewManagerSingleton } from './accountViewManager.js';
 import {
@@ -336,6 +326,12 @@ function makeFactory(): WindowFactory & { createWindow: ReturnType<typeof vi.fn>
 }
 
 beforeEach(() => {
+  const createTimeout = resourceCleanup.createTrackedTimeout;
+  vi.spyOn(resourceCleanup, 'createTrackedTimeout').mockImplementation((callback, delay, name) => {
+    const id = createTimeout(callback, delay, name);
+    h.trackedTimers.push({ id, callback, delay, name });
+    return id;
+  });
   // Fresh state before each test
   h.createdWindows.length = 0;
   h.bootstrapSet.clear();
@@ -349,6 +345,9 @@ beforeEach(() => {
 
 afterEach(() => {
   destroyAccountWindowManager();
+  getCleanupManager().reset();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 // ---------------------------------------------------------------------------
@@ -545,6 +544,33 @@ describe('AccountWindowManager — registry queries', () => {
 // ---------------------------------------------------------------------------
 
 describe('AccountWindowManager — activity listeners', () => {
+  it.each(['focus', 'show', 'unregister', 'dehydrate', 'destroy'] as const)(
+    'releases the actual dehydration registration on %s',
+    (operation) => {
+      vi.useFakeTimers();
+      const manager = new AccountWindowManager(makeFactory());
+      const window = new h.MockBW();
+      const account = asAccountIndex(1);
+      manager.registerWindow(asType<Electron.BrowserWindow>(window), account);
+      const signal = getCleanupManager()['timerAborter'].signal;
+      window.emit('blur');
+      expect(h.trackedTimers).toHaveLength(1);
+      expect(getEventListeners(signal, 'abort')).toHaveLength(1);
+
+      if (operation === 'focus' || operation === 'show') window.emit(operation);
+      else if (operation === 'unregister') manager.unregisterAccount(account);
+      else if (operation === 'dehydrate') manager.dehydrateAccount(account);
+      else manager.destroyAll();
+
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+      vi.advanceTimersByTime(90000);
+      if (operation === 'focus' || operation === 'show' || operation === 'unregister') {
+        expect(window.isDestroyed()).toBe(false);
+      }
+      manager.destroyAll();
+    }
+  );
+
   it('keeps account-0 unthrottled regardless of focus/blur state', () => {
     const m = new AccountWindowManager();
     const w = new h.MockBW() as unknown as Electron.BrowserWindow;

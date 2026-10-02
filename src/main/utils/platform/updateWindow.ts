@@ -13,7 +13,7 @@ import log from 'electron-log';
 import { APP_ICON_AURORA_CSS, appIconWithAuroraHtml } from '../../../shared/appIconAurora.js';
 import { escapeHtml } from '../../../shared/escapeHtml.js';
 import { DIALOG_BACKGROUND_COLOR, platformDialogChrome } from './dialogChrome.js';
-import { createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 
 /** Deadline for the checking-phase `loadURL` so a hung data: document cannot stall the poll. */
 export const UPDATE_CHECKING_LOAD_TIMEOUT_MS = 5_000;
@@ -570,7 +570,7 @@ export async function presentUpdateDialog(
       log.error('[Update] Failed to load update dialog:', err);
     } finally {
       if (loadTimeout !== undefined) {
-        clearTimeout(loadTimeout);
+        cancelTrackedTimeout(loadTimeout);
       }
     }
     if (!win.isDestroyed() && gen === dialogGeneration) {

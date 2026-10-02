@@ -2,7 +2,8 @@
  * Unit tests for shared native OS notification helper and unread-delta policy.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 class FakeNotification {
   static all: FakeNotification[] = [];
@@ -76,12 +77,11 @@ vi.mock('../../../shared/constants.js', () => ({
   BADGE: { DISPLAY_MAX: 99, MAX_COUNT: 9999, CACHE_LIMIT: 99 },
 }));
 
-const createTrackedTimeoutMock = vi.fn((callback: () => void, _delay: number, _name?: string) =>
-  setTimeout(callback, 100)
-);
-vi.mock('../lifecycle/resourceCleanup.js', () => ({
-  createTrackedTimeout: (cb: () => void, delay: number, name?: string) =>
-    createTrackedTimeoutMock(cb, delay, name),
+vi.mock('../lifecycle/logger.js', () => ({
+  logger: {
+    feature: () => ({ debug: vi.fn(), info: vi.fn(), error: vi.fn() }),
+    main: { debug: vi.fn() },
+  },
 }));
 
 vi.mock('./notificationFocus.js', () => ({
@@ -121,13 +121,17 @@ describe('nativeNotification', () => {
   beforeEach(async () => {
     vi.resetModules();
     FakeNotification.resetAll();
-    createTrackedTimeoutMock.mockClear();
     focusNotificationSourceMock.mockClear();
-    createTrackedTimeoutMock.mockImplementation(
-      (callback: () => void, _delay: number, _name?: string) => setTimeout(callback, 100)
-    );
     const mod = await import('./nativeNotification.js');
     mod.resetBridgeNotificationCooldownForTests();
+  });
+
+  afterEach(async () => {
+    const notifications = await import('./nativeNotification.js');
+    notifications.cleanupActiveNativeNotifications();
+    const cleanup = await import('../lifecycle/resourceCleanup.js');
+    cleanup.destroyCleanupManager();
+    vi.useRealTimers();
   });
 
   describe('buildAccountAwareNotificationPayload', () => {
@@ -206,6 +210,40 @@ describe('nativeNotification', () => {
   });
 
   describe('showNativeNotification', () => {
+    it('releases replaced registrations and the current registration on dismissal', async () => {
+      vi.useFakeTimers();
+      const { showNativeNotification } = await import('./nativeNotification.js');
+      const { getCleanupManager } = await import('../lifecycle/resourceCleanup.js');
+      const signal = getCleanupManager()['timerAborter'].signal;
+      expect(showNativeNotification({ title: 'First', tag: 'same' }, {})).toBe(true);
+      const first = FakeNotification.all[0];
+      expect(getEventListeners(signal, 'abort')).toHaveLength(1);
+
+      showNativeNotification({ title: 'Second', tag: 'same' }, {});
+
+      expect(first?.closed).toBe(true);
+      expect(getEventListeners(signal, 'abort')).toHaveLength(1);
+      FakeNotification.all[0]?.close();
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+      vi.advanceTimersByTime(10000);
+      expect(FakeNotification.all).toHaveLength(0);
+    });
+
+    it('releases every registration during notification cleanup', async () => {
+      const { showNativeNotification, cleanupActiveNativeNotifications } =
+        await import('./nativeNotification.js');
+      const { getCleanupManager } = await import('../lifecycle/resourceCleanup.js');
+      const signal = getCleanupManager()['timerAborter'].signal;
+      showNativeNotification({ title: 'One', tag: 'one' }, {});
+      showNativeNotification({ title: 'Two', tag: 'two' }, {});
+      expect(getEventListeners(signal, 'abort')).toHaveLength(2);
+
+      cleanupActiveNativeNotifications();
+
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+      expect(FakeNotification.all).toHaveLength(0);
+    });
+
     it('passes subtitle and groupId to Electron Notification', async () => {
       const { showNativeNotification, buildAccountAwareNotificationPayload } =
         await import('./nativeNotification.js');
@@ -292,7 +330,7 @@ describe('nativeNotification', () => {
       );
       const n = FakeNotification.all[0];
       expect(n?.closed).toBe(false);
-      await vi.advanceTimersByTimeAsync(150);
+      await vi.advanceTimersByTimeAsync(10000);
       expect(n?.closed).toBe(true);
       vi.useRealTimers();
     });
@@ -355,10 +393,6 @@ describe('nativeNotification', () => {
 
     it('auto-dismiss swallows close errors', async () => {
       vi.useFakeTimers();
-      createTrackedTimeoutMock.mockImplementation((callback: () => void) => {
-        setTimeout(callback, 100);
-        return 1 as unknown as ReturnType<typeof setTimeout>;
-      });
       const { showNativeNotification } = await import('./nativeNotification.js');
       const win = makeWindow();
       showNativeNotification({ title: 'Z', tag: 'z' }, { focusWindow: win as never });
@@ -368,7 +402,7 @@ describe('nativeNotification', () => {
           throw new Error('dismiss fail');
         };
       }
-      await vi.advanceTimersByTimeAsync(150);
+      await vi.advanceTimersByTimeAsync(10000);
       vi.useRealTimers();
     });
   });

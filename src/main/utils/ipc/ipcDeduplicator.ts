@@ -5,7 +5,7 @@
  */
 
 import { logger } from '../lifecycle/logger.js';
-import { createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 import { asType } from '../../../shared/typeUtils.js';
 
 /**
@@ -172,7 +172,7 @@ export class IPCDeduplicator {
    */
   private cancelScheduledCleanup(): void {
     if (this.cleanupTimeout) {
-      clearTimeout(this.cleanupTimeout);
+      cancelTrackedTimeout(this.cleanupTimeout);
       this.cleanupTimeout = null;
     }
   }

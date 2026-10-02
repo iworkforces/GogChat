@@ -2,12 +2,17 @@ import type { BrowserWindow, IpcMainEvent, WebContents } from 'electron';
 import { Notification, app } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'node:url';
 import log from 'electron-log';
 import { IPC_CHANNELS, TIMING } from '../../shared/constants.js';
 import { validateOnlineCheckRequest } from '../../shared/dataValidators.js';
 import { defineIPC } from '../utils/ipc/defineIPC.js';
-import { createTrackedTimeout, getCleanupManager } from '../utils/lifecycle/resourceCleanup.js';
+import { createTrackedTimeout, cancelTrackedTimeout } from '../utils/lifecycle/resourceCleanup.js';
 import { getIconCache } from '../utils/platform/iconCache.js';
+import type { IAccountWindowManager } from '../../shared/types/window.js';
+import { asAccountIndex } from '../../shared/types/branded.js';
+import { loadAccountURLAndWait } from '../utils/account/accountNavigation.js';
+import { asType } from '../../shared/typeUtils.js';
 
 let checkIfOnlineCleanup: (() => void) | null = null;
 
@@ -32,8 +37,7 @@ function clearCoalesceTimer(probe: ActiveOnlineProbe): void {
   if (probe.coalesceTimer === null) {
     return;
   }
-  clearTimeout(probe.coalesceTimer);
-  getCleanupManager().untrackTimeout(probe.coalesceTimer);
+  cancelTrackedTimeout(probe.coalesceTimer);
   probe.coalesceTimer = null;
 }
 
@@ -55,7 +59,7 @@ function abortActiveProbe(senderId: number, clearFetchGate = false): void {
 }
 
 function abortAllProbes(): void {
-  for (const senderId of [...activeProbes.keys()]) {
+  for (const senderId of activeProbes.keys()) {
     abortActiveProbe(senderId, true);
   }
   lastFetchStartedAt.clear();
@@ -227,66 +231,136 @@ function startSenderProbe(attemptId: string, event: IpcMainEvent): void {
   );
 }
 
-/**
- * Show offline notification to user
- */
-const showOfflineNotification = (window: BrowserWindow) => {
-  const notification = new Notification({
-    title: 'GogChat',
-    body: `You are offline.\nCheck your internet connection.`,
-    silent: true,
-    timeoutType: 'default',
-    icon: getIconCache().getIcon('resources/icons/normal/256.png'),
-  });
+function captureInitialDocument(manager: IAccountWindowManager) {
+  const accountIndex = asAccountIndex(0);
+  const contents = manager.getAccountWebContents(accountIndex);
+  const controller = new AbortController();
+  let active = true;
+  let expectedNavigation: string | null = null;
+  let delay: NodeJS.Timeout | null = null;
+  let notification: Notification | null = null;
 
-  notification.on('click', () => {
-    window.show();
-    notification.close();
-  });
-
-  notification.show();
-};
-
-/**
- * Check for internet connectivity and load offline page if disconnected
- */
-const checkForInternet = async (window: BrowserWindow) => {
-  try {
-    const canChat = await checkIfOnline();
-
-    if (!canChat) {
-      log.debug('[Connectivity] Initial connectivity probe failed; confirming offline state...');
-
-      const confirmedOffline = !(await checkIfOnline(TIMING.CONNECTIVITY_CHECK));
-      if (!confirmedOffline) {
-        log.info(
-          '[Connectivity] Connectivity restored on confirmation probe; staying on current page'
-        );
-        return;
-      }
-
-      const offlinePagePath = path.join(app.getAppPath(), 'lib/offline/index.html');
-      if (!fs.existsSync(offlinePagePath)) {
-        log.error(
-          `[Connectivity] Offline page missing at ${offlinePagePath} - staying on current page`
-        );
-        showOfflineNotification(window);
-        return;
-      }
-
-      await window.loadURL(`file://${offlinePagePath}`);
-      showOfflineNotification(window);
-      log.warn('[Connectivity] Loaded offline page - no internet connection');
+  const disposeBanner = (): void => {
+    notification?.removeListener('click', onClick);
+    notification?.close();
+    notification = null;
+  };
+  const dispose = (): void => {
+    if (!active) return;
+    active = false;
+    controller.abort();
+    if (delay) cancelTrackedTimeout(delay);
+    delay = null;
+    contents?.removeListener('did-start-navigation', onNavigation);
+    contents?.removeListener('destroyed', dispose);
+    disposeBanner();
+  };
+  const isCurrent = (): boolean => {
+    if (
+      !active ||
+      !contents ||
+      contents.isDestroyed() ||
+      manager.isDehydrated(accountIndex) ||
+      manager.getAccountWebContents(accountIndex) !== contents
+    ) {
+      dispose();
+      return false;
     }
-  } catch (error: unknown) {
-    log.error('[Connectivity] Failed to check internet:', error);
+    return true;
+  };
+  const onClick = (): void => {
+    if (isCurrent()) manager.focusAccount(accountIndex);
+    disposeBanner();
+  };
+  const onNavigation = (details: { isMainFrame: boolean; url: string }): void => {
+    if (!details.isMainFrame) return;
+    if (expectedNavigation === details.url) {
+      expectedNavigation = null;
+      return;
+    }
+    dispose();
+  };
+  if (isCurrent()) {
+    contents?.on('did-start-navigation', onNavigation);
+    contents?.once('destroyed', dispose);
   }
-};
+
+  const run = async (): Promise<void> => {
+    if (!isCurrent()) return;
+    const fastOnline = await checkIfOnline(TIMING.CONNECTIVITY_CHECK_FAST, controller.signal);
+    if (!isCurrent()) return;
+    if (fastOnline) {
+      dispose();
+      return;
+    }
+    const online = await checkIfOnline(TIMING.CONNECTIVITY_CHECK, controller.signal);
+    if (!isCurrent()) return;
+    if (online) {
+      dispose();
+      return;
+    }
+    const offlinePagePath = path.join(app.getAppPath(), 'lib/offline/index.html');
+    if (fs.existsSync(offlinePagePath)) {
+      expectedNavigation = pathToFileURL(offlinePagePath).href;
+      const loaded = await loadAccountURLAndWait(manager, accountIndex, expectedNavigation);
+      expectedNavigation = null;
+      if (!isCurrent()) return;
+      if (!loaded) {
+        dispose();
+        return;
+      }
+    } else {
+      log.error(
+        `[Connectivity] Offline page missing at ${offlinePagePath} - staying on current page`
+      );
+    }
+    if (!isCurrent()) return;
+    notification = new Notification({
+      title: 'GogChat',
+      body: `You are offline.\nCheck your internet connection.`,
+      silent: true,
+      timeoutType: 'default',
+      icon: getIconCache().getIcon('resources/icons/normal/256.png'),
+    });
+    notification.on('click', onClick);
+    notification.show();
+  };
+  return {
+    run,
+    dispose,
+    schedule: () => {
+      if (isCurrent())
+        delay = createTrackedTimeout(
+          () => {
+            delay = null;
+            void run().catch((error: unknown) => {
+              dispose();
+              log.error('[Connectivity] Failed to check internet:', error);
+            });
+          },
+          3000,
+          'initial-connectivity-check'
+        );
+    },
+  };
+}
+
+export function scheduleInitialConnectivity(manager: IAccountWindowManager): () => void {
+  const owner = captureInitialDocument(manager);
+  owner.schedule();
+  return () => {
+    owner.dispose();
+    cleanupConnectivityHandler();
+  };
+}
+
+const checkForInternet = (manager: IAccountWindowManager): Promise<void> =>
+  captureInitialDocument(manager).run();
 
 /**
  * Setup IPC handlers for connectivity checks
  */
-export default (_window: BrowserWindow) => {
+export default (_window?: BrowserWindow) => {
   // No defineIPC rateLimit: a 1/s cap would drop a replacement before
   // same-sender supersession. Fetch cadence is gated after the handler runs.
   checkIfOnlineCleanup = defineIPC({
@@ -321,3 +395,15 @@ export function cleanupConnectivityHandler(): void {
 }
 
 export { checkForInternet };
+
+if (process.env['TESTING'] === 'true') {
+  const testGlobal = asType<
+    typeof globalThis & {
+      __gogchatInitialConnectivity?: {
+        checkForInternet: typeof checkForInternet;
+        scheduleInitialConnectivity: typeof scheduleInitialConnectivity;
+      };
+    }
+  >(globalThis);
+  testGlobal.__gogchatInitialConnectivity = { checkForInternet, scheduleInitialConnectivity };
+}

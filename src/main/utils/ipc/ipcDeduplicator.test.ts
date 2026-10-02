@@ -34,6 +34,7 @@ vi.mock('../lifecycle/logger.js', () => ({
 
 // Mock resourceCleanup to avoid pulling in real cleanup manager
 vi.mock('../lifecycle/resourceCleanup.js', () => ({
+  cancelTrackedTimeout: (handle: NodeJS.Timeout) => clearTimeout(handle),
   createTrackedTimeout: (callback: () => void, delay: number, _name?: string) =>
     setTimeout(callback, delay),
 }));

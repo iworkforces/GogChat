@@ -13,7 +13,7 @@
 
 import { app, session } from 'electron';
 import log from 'electron-log';
-import { createTrackedInterval } from '../lifecycle/resourceCleanup.js';
+import { cancelTrackedInterval, createTrackedInterval } from '../lifecycle/resourceCleanup.js';
 import { toErrorMessage } from '../lifecycle/errorUtils.js';
 import { asType } from '../../../shared/typeUtils.js';
 import type { IAccountWindowManager } from '../../../shared/types/window.js';
@@ -295,7 +295,7 @@ export function stopSessionMaintenance(owner?: IAccountWindowManager): void {
     return;
   }
   if (maintenanceInterval) {
-    clearInterval(maintenanceInterval);
+    cancelTrackedInterval(maintenanceInterval);
     maintenanceInterval = null;
     log.info('[AccountSessionMaintenance] Scheduler stopped');
   }

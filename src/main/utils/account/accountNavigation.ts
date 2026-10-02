@@ -14,17 +14,17 @@ import { isGoogleAuthUrl } from '../../../shared/urlValidators.js';
  * Load `url` in the account's WebContents unless it is mid Google auth.
  * @returns true if loadURL was invoked; false if no WC, destroyed, or auth protected.
  */
-export function loadAccountURL(
+function initiateAccountLoad(
   manager: IAccountWindowManager,
   accountIndex: AccountIndex,
   url: string
-): boolean {
+): Promise<boolean> | null {
   const webContents = manager.getAccountWebContents(accountIndex);
-  if (!webContents || webContents.isDestroyed()) {
+  if (!webContents || webContents.isDestroyed() || manager.isDehydrated(accountIndex)) {
     log.debug(
       `[AccountNavigation] loadAccountURL: no live WebContents for account ${accountIndex}`
     );
-    return false;
+    return null;
   }
 
   try {
@@ -33,14 +33,40 @@ export function loadAccountURL(
       log.info(
         `[AccountNavigation] Skipping loadURL for account ${accountIndex} — Google auth page active`
       );
-      return false;
+      return null;
     }
   } catch (error: unknown) {
     log.warn(`[AccountNavigation] getURL failed for account ${accountIndex}:`, error);
   }
 
-  void webContents.loadURL(url);
-  return true;
+  try {
+    return webContents.loadURL(url).then(
+      () => true,
+      (error: unknown) => {
+        log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}:`, error);
+        return false;
+      }
+    );
+  } catch (error: unknown) {
+    log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}:`, error);
+    return null;
+  }
+}
+
+export function loadAccountURL(
+  manager: IAccountWindowManager,
+  accountIndex: AccountIndex,
+  url: string
+): boolean {
+  return initiateAccountLoad(manager, accountIndex, url) !== null;
+}
+
+export async function loadAccountURLAndWait(
+  manager: IAccountWindowManager,
+  accountIndex: AccountIndex,
+  url: string
+): Promise<boolean> {
+  return (await initiateAccountLoad(manager, accountIndex, url)) ?? false;
 }
 
 /**

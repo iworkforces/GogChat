@@ -126,6 +126,7 @@ vi.mock('./bootstrapPromotion.js', () => ({
 
 // Mock resourceCleanup for createTrackedInterval
 vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
+  cancelTrackedInterval: (handle: NodeJS.Timeout) => clearInterval(handle),
   createTrackedInterval: vi.fn().mockReturnValue({} as NodeJS.Timeout),
 }));
 

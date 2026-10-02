@@ -7,8 +7,7 @@
  * updateContext) are routed through the `callbacks` slot on FeatureContext.
  */
 
-import type { BrowserWindow, Tray } from 'electron';
-import { createTrackedTimeout } from '../utils/lifecycle/resourceCleanup.js';
+import type { Tray } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants.js';
 import type { FeatureSpec } from '../utils/lifecycle/featureConfigTypes.js';
 import { SUPPORTED_PLATFORM_NAMES } from '../utils/platform/platformDetection.js';
@@ -192,18 +191,12 @@ export const DEFERRED_FEATURES = [
       listen: [IPC_CHANNELS.CHECK_IF_ONLINE],
       emit: [IPC_CHANNELS.ONLINE_STATUS],
     },
-    init: async ({ mainWindow }) => {
-      if (!mainWindow) return;
+    init: async ({ accountWindowManager, callbacks }) => {
+      if (!accountWindowManager) return;
       const module = await import('../features/inOnline.js');
-      const win: BrowserWindow = mainWindow;
-      module.default(win);
-      createTrackedTimeout(
-        () => {
-          void module.checkForInternet(win);
-        },
-        3000,
-        'initial-connectivity-check'
-      );
+      module.default();
+      const dispose = module.scheduleInitialConnectivity(accountWindowManager);
+      callbacks?.registerCleanupTask('inOnline', dispose);
     },
   },
   // Telemetry: after shell UI batch (appMenu) so CDP does not race first paint path
