@@ -18,7 +18,10 @@
 import type { WebContents } from 'electron';
 import log from 'electron-log';
 import { getDisableCdpTelemetry } from '../utils/security/secureFlags.js';
-import { createTrackedInterval } from '../utils/lifecycle/resourceCleanup.js';
+import {
+  cancelTrackedInterval,
+  createTrackedInterval,
+} from '../utils/lifecycle/resourceCleanup.js';
 import * as cdpMetrics from '../utils/lifecycle/cdpMetrics.js';
 import { asAccountIndex } from '../../shared/types/branded.js';
 import type { IAccountWindowManager } from '../../shared/types/window.js';
@@ -117,7 +120,7 @@ async function setupCdpTelemetry(accountWC: WebContents): Promise<boolean> {
 
   const detachListener = (): void => {
     log.info('[CdpTelemetry] Debugger detached — stopping sampling');
-    clearInterval(interval);
+    cancelTrackedInterval(interval);
     activeHandle = null;
   };
   accountWC.debugger.once('detach', detachListener);
@@ -136,7 +139,7 @@ export function teardownCdpTelemetry(): void {
   const { webContents: wc, interval, detachListener } = activeHandle;
   activeHandle = null;
   try {
-    clearInterval(interval);
+    cancelTrackedInterval(interval);
   } catch {
     // ignore
   }
