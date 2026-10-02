@@ -8,7 +8,20 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { _electron as electron, expect, test } from '@playwright/test';
+import { IPC_CHANNELS } from '../../../src/shared/constants.js';
+import { validateOnlineCheckRequest } from '../../../src/shared/dataValidators.js';
+import urls from '../../../src/urls.js';
 import { closeElectronApp } from '../../helpers/electron-test';
+
+declare global {
+  interface Window {
+    __offlineFailed: number;
+    __offlineFailures: number[];
+    __checkStarted: number;
+    __documentId: string;
+    __statusReplies: number;
+  }
+}
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../..');
 const PRELOAD_PATH = path.join(PROJECT_ROOT, 'lib/preload/index.js');
@@ -29,15 +42,18 @@ const FIXTURE_HTML = `<!doctype html>
     </div>
     <script>
       window.__offlineFailed = 0;
+      window.__offlineFailures = [];
+      window.__documentId = crypto.randomUUID();
       window.addEventListener('app:onlineCheckFailed', () => {
         window.__offlineFailed += 1;
+        window.__offlineFailures.push(performance.now() - window.__checkStarted);
       });
     </script>
   </body>
 </html>
 `;
 
-const FIXTURE_MAIN = `const { app, BrowserWindow, ipcMain } = require('electron');
+const FIXTURE_MAIN = `const { app, BrowserWindow, ipcMain, session } = require('electron');
 const path = require('path');
 
 const preload = process.env.GOGCHAT_PRELOAD_PATH;
@@ -64,6 +80,10 @@ for (const channel of [
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.protocol.handle('https', () => new Response(
+    '<!doctype html><title>Recovered fixture</title><body>Recovered</body>',
+    { headers: { 'content-type': 'text/html' } }
+  ));
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -73,6 +93,9 @@ app.whenReady().then(() => {
       nodeIntegration: false,
       webSecurity: true,
     },
+  });
+  win.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame) app.__gogchatIpc.push({ channel: 'fixture:navigation', data: details.url });
   });
   win.loadFile(page);
 });
@@ -91,14 +114,15 @@ async function recordedIpc(
 
 test.describe('built CJS preload entry', () => {
   test('installs production preload behaviors from lib/preload/index.js', async () => {
+    const testInfo = test.info();
     const userData = await mkdtemp(path.join(tmpdir(), 'gogchat-preload-'));
     const htmlPath = path.join(userData, 'index.html');
     const mainPath = path.join(userData, 'main.cjs');
-    await writeFile(htmlPath, FIXTURE_HTML);
-    await writeFile(mainPath, FIXTURE_MAIN);
-
     let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
+    const evidence: unknown[] = [];
     try {
+      await writeFile(htmlPath, FIXTURE_HTML);
+      await writeFile(mainPath, FIXTURE_MAIN);
       app = await electron.launch({
         args: [mainPath],
         env: {
@@ -171,69 +195,145 @@ test.describe('built CJS preload entry', () => {
       const activeId = await page.evaluate(() => document.activeElement?.id);
       expect(activeId).toBe('search');
 
+      const localUrl = page.url();
+      const documentId = await page.evaluate(() => window.__documentId);
+      const initialHistoryLength = await page.evaluate(() => history.length);
+      const navigations: string[] = [];
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame()) navigations.push(frame.url());
+      });
       await page.evaluate(() => {
-        window.dispatchEvent(new Event('app:checkIfOnline'));
+        window.__statusReplies = 0;
+        window.gogchat.onOnlineStatus(() => {
+          window.__statusReplies += 1;
+        });
       });
-      await page.waitForTimeout(50);
-      const afterOnlineCheck = await recordedIpc(app);
-      const onlineRequest = afterOnlineCheck.find((item) => item.channel === 'checkIfOnline');
-      expect(onlineRequest).toEqual({
-        channel: 'checkIfOnline',
-        data: { attemptId: expect.any(String) },
-      });
-      const firstAttemptId = (onlineRequest?.data as { attemptId: string }).attemptId;
+      const runtime = app;
+      let requestCount = 0;
+      const checkOnline = async () => {
+        await page.evaluate(() => {
+          window.__checkStarted = performance.now();
+          window.dispatchEvent(new Event('app:checkIfOnline'));
+        });
+        requestCount += 1;
+        await expect
+          .poll(
+            async () =>
+              (await recordedIpc(runtime)).filter(
+                (item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE
+              ).length
+          )
+          .toBe(requestCount);
+        const requests = (await recordedIpc(runtime)).filter(
+          (item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE
+        );
+        const { attemptId } = validateOnlineCheckRequest(requests[requestCount - 1]?.data);
+        evidence.push({ phase: 'request', attemptId, requestCount, url: page.url() });
+        return attemptId;
+      };
+      const reply = async (attemptId: string, online: boolean) => {
+        const received = await page.evaluate(() => window.__statusReplies);
+        evidence.push({ phase: 'reply', attemptId, online });
+        await runtime.evaluate(
+          ({ BrowserWindow }, payload) => {
+            BrowserWindow.getAllWindows()[0]?.webContents.send(payload.channel, payload.status);
+          },
+          { channel: IPC_CHANNELS.ONLINE_STATUS, status: { attemptId, online } }
+        );
+        await page.waitForFunction((count) => window.__statusReplies === count + 1, received);
+      };
+      const retainedDocument = async (phase: string, failed: number) => {
+        const state = await page.evaluate(() => ({
+          url: location.href,
+          documentId: window.__documentId,
+          failed: window.__offlineFailed,
+          elapsedMs: window.__offlineFailures,
+          replies: window.__statusReplies,
+        }));
+        evidence.push({
+          phase,
+          ...state,
+          navigations: [...navigations],
+          navigationCount: navigations.length,
+        });
+        expect(state).toMatchObject({ url: localUrl, documentId, failed });
+        expect(navigations).toEqual([]);
+        expect(
+          (await recordedIpc(runtime))
+            .filter((item) => item.channel === 'fixture:navigation')
+            .map((item) => item.data)
+        ).toEqual([localUrl]);
+      };
 
-      await app.evaluate(({ BrowserWindow }) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        win?.webContents.send('onlineStatus', { attemptId: 'stale', online: false });
+      const deadlineSupersededAttemptId = await checkOnline();
+      const expiredAttemptId = await checkOnline();
+      await reply(deadlineSupersededAttemptId, true);
+      await reply(deadlineSupersededAttemptId, false);
+      await reply('stale', false);
+      await retainedDocument('older-replies-before-deadline', 0);
+      await page.waitForFunction(() => window.__offlineFailed === 1, undefined, {
+        timeout: 10_000,
       });
-      await page.waitForTimeout(50);
-      const staleFailedCount = await page.evaluate(() => {
-        return (window as unknown as { __offlineFailed: number }).__offlineFailed;
-      });
-      expect(staleFailedCount).toBe(0);
+      await retainedDocument('production-deadline', 1);
+      expect(await page.evaluate(() => window.__offlineFailures[0])).toBeGreaterThanOrEqual(5_500);
+      await reply(expiredAttemptId, true);
+      await reply(expiredAttemptId, false);
+      await retainedDocument('late-correlated-replies', 1);
 
-      await app.evaluate(({ BrowserWindow }, payload) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        win?.webContents.send('onlineStatus', payload);
-      }, { attemptId: firstAttemptId, online: false });
-      await page.waitForTimeout(50);
-      const failedCount = await page.evaluate(() => {
-        return (window as unknown as { __offlineFailed: number }).__offlineFailed;
-      });
-      expect(failedCount).toBe(1);
-      expect(page.url().startsWith('file://')).toBe(true);
+      const supersededAttemptId = await checkOnline();
+      const currentAttemptId = await checkOnline();
+      expect(currentAttemptId).not.toBe(supersededAttemptId);
+      await reply('stale', false);
+      await reply(supersededAttemptId, true);
+      await reply(supersededAttemptId, false);
+      await retainedDocument('superseded-replies', 1);
+      await reply(currentAttemptId, false);
+      await retainedDocument('current-false', 2);
 
-      await page.evaluate(() => {
-        window.dispatchEvent(new Event('app:checkIfOnline'));
-      });
-      await page.waitForTimeout(50);
-      const afterSecondCheck = await recordedIpc(app);
-      const secondRequest = [...afterSecondCheck]
-        .reverse()
-        .find((item) => item.channel === 'checkIfOnline');
-      const secondAttemptId = (secondRequest?.data as { attemptId: string }).attemptId;
-      expect(secondAttemptId).not.toBe(firstAttemptId);
-
-      await app.evaluate(({ BrowserWindow }, payload) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        win?.webContents.send('onlineStatus', payload);
-      }, { attemptId: secondAttemptId, online: true });
-      await page.waitForURL(
-        (url) => {
-          const href = url.toString();
-          return href.includes('chat.google.com') || href.includes('workspace.google.com');
+      const successAttemptId = await checkOnline();
+      const appUrl = new URL(urls.appUrl).href;
+      await runtime.evaluate(
+        ({ BrowserWindow }, payload) => {
+          const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+          contents?.send(payload.channel, payload.status);
+          contents?.send(payload.channel, payload.status);
         },
         {
-          timeout: 8_000,
-          waitUntil: 'commit',
+          channel: IPC_CHANNELS.ONLINE_STATUS,
+          status: { attemptId: successAttemptId, online: true },
         }
       );
+      await page.waitForURL(appUrl, { timeout: 8_000, waitUntil: 'load' });
+      expect(navigations).toEqual([appUrl]);
+      const historyLength = await page.evaluate(() => history.length);
+      expect(historyLength).toBe(initialHistoryLength);
+      const startedNavigations = (await recordedIpc(runtime))
+        .filter((item) => item.channel === 'fixture:navigation')
+        .map((item) => item.data);
+      expect(startedNavigations).toEqual([localUrl, appUrl]);
+      evidence.push({
+        phase: 'duplicate-current-success',
+        expiredAttemptId,
+        supersededAttemptId,
+        currentAttemptId,
+        successAttemptId,
+        url: page.url(),
+        navigations: [...navigations],
+        startedNavigations,
+        navigationCount: navigations.length,
+        startedNavigationCount: startedNavigations.length,
+        initialHistoryLength,
+        historyLength,
+      });
     } finally {
       if (app) {
         await closeElectronApp(app);
       }
       await rm(userData, { recursive: true, force: true });
+      await testInfo.attach('built-cjs-offline-recovery', {
+        body: JSON.stringify(evidence, null, 2),
+        contentType: 'application/json',
+      });
     }
   });
 });
