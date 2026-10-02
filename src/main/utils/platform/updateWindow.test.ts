@@ -75,6 +75,7 @@ vi.mock('electron-log', () => ({
 }));
 
 vi.mock('../lifecycle/resourceCleanup.js', () => ({
+  cancelTrackedTimeout: (handle: NodeJS.Timeout) => clearTimeout(handle),
   createTrackedTimeout: vi.fn((fn: () => void, ms: number) => setTimeout(fn, ms)),
 }));
 
