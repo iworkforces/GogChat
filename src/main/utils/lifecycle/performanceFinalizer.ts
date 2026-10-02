@@ -15,7 +15,7 @@ import log from 'electron-log';
 import path from 'path';
 
 import type { IAccountWindowManager } from '../../../shared/types/window.js';
-import { createTrackedTimeout } from './resourceCleanup.js';
+import { cancelTrackedTimeout, createTrackedTimeout } from './resourceCleanup.js';
 import { getPerformanceMonitor } from './performanceMonitor.js';
 
 export interface ArmPerformanceFinalizerOptions {
@@ -87,7 +87,7 @@ function tryFinalize(reasonIfForced?: string): void {
   if (!shouldExport()) {
     state.exported = true;
     if (state.timeoutHandle) {
-      clearTimeout(state.timeoutHandle);
+      cancelTrackedTimeout(state.timeoutHandle);
       state.timeoutHandle = null;
     }
     log.debug('[Performance] Finalizer skipped export (not in export mode)');
@@ -126,7 +126,7 @@ function tryFinalize(reasonIfForced?: string): void {
 
   state.exported = true;
   if (state.timeoutHandle) {
-    clearTimeout(state.timeoutHandle);
+    cancelTrackedTimeout(state.timeoutHandle);
     state.timeoutHandle = null;
   }
 
@@ -226,7 +226,7 @@ export function notifyDocumentLoadFailed(reason: string): void {
  */
 export function resetPerformanceFinalizerForTests(): void {
   if (state.timeoutHandle) {
-    clearTimeout(state.timeoutHandle);
+    cancelTrackedTimeout(state.timeoutHandle);
   }
   state.armed = false;
   state.deferredReady = false;
