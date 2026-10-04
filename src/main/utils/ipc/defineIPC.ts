@@ -62,10 +62,14 @@ export function runIPCHandler<T>(span: HandlerSpan, handler: () => T | Promise<T
   let pending = false;
   try {
     const result = handler();
-    if (result && typeof asType<PromiseLike<T>>(result).then === 'function') {
-      const settled = Promise.resolve(result).finally(finish);
+    const thenable = asType<PromiseLike<T>>(result);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- Rereads change accessor thenables' await semantics; call restores this.
+    const then = result == null ? undefined : thenable.then;
+    if (typeof then === 'function') {
       pending = true;
-      return settled;
+      return new Promise<T>((resolve, reject) => {
+        then.call(thenable, resolve, reject);
+      }).finally(finish);
     }
     return result;
   } finally {

@@ -91,6 +91,43 @@ describe('registered IPC latency producers', () => {
     }
   );
 
+  it.each(['reply', 'invoke'] as const)(
+    'settles an accessor thenable for %s with one getter read and one sample',
+    async (kind) => {
+      let reads = 0;
+      const thenable = asType<Promise<number>>(
+        // oxlint-disable-next-line unicorn/no-thenable -- Exercise single-read accessor settlement.
+        Object.defineProperty({}, 'then', {
+          get: () => {
+            reads++;
+            if (reads > 1) throw new Error('then read twice');
+            return (resolve: (value: number) => void) => {
+              now = 17;
+              resolve(7);
+            };
+          },
+        })
+      );
+      defineIPC({
+        kind,
+        channel,
+        validator: () => undefined,
+        handler: () => thenable,
+      });
+      const sender = event();
+
+      const result = dispatch(sender);
+      await result;
+      await flush();
+
+      if (kind === 'invoke') expect(await result).toBe(7);
+      if (kind === 'reply')
+        expect(sender.reply).toHaveBeenCalledWith(`${channel}-reply`, { success: true, data: 7 });
+      expect(reads).toBe(1);
+      expect(samples()).toEqual([expect.objectContaining({ channel, kind, durationMs: 7 })]);
+    }
+  );
+
   it.each(['on', 'reply', 'invoke'] as const)(
     'records one sample for a throwing %s handler',
     async (kind) => {

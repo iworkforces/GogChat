@@ -107,6 +107,30 @@ describe('IPC handler execution spans', () => {
     ]);
   });
 
+  it('reads an accessor thenable once and records its exact settlement duration', async () => {
+    let reads = 0;
+    const thenable = asType<Promise<number>>(
+      // oxlint-disable-next-line unicorn/no-thenable -- Exercise single-read accessor settlement.
+      Object.defineProperty({}, 'then', {
+        get: () => {
+          reads++;
+          if (reads > 1) throw new Error('then read twice');
+          return (resolve: (value: number) => void) => {
+            now = 107;
+            resolve(7);
+          };
+        },
+      })
+    );
+
+    await expect(runIPCHandler(context(), () => thenable)).resolves.toBe(7);
+
+    expect(reads).toBe(1);
+    expect(getPerformanceMonitor().getIpcLatencySamples()).toEqual([
+      expect.objectContaining({ durationMs: 7 }),
+    ]);
+  });
+
   it('records without account identity when the sender is absent', () => {
     runIPCHandler({ ...context(), event: asType<IpcMainEvent>({}) }, () => 1);
     expect(getPerformanceMonitor().getIpcLatencySamples()).toEqual([
