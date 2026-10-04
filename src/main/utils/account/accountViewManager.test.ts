@@ -302,6 +302,7 @@ import {
 } from './accountViewManager.js';
 import { asAccountIndex, asWebContentsId } from '../../../shared/types/branded.js';
 import log from 'electron-log';
+import { logger } from '../lifecycle/logger.js';
 import {
   SECRET_AUTH_URL,
   SECRET_CHAT_URL,
@@ -1670,6 +1671,8 @@ describe('AccountViewManager — log redaction', () => {
   });
 
   it('keeps URL-free park, unpark, bootstrap and destroy messages', () => {
+    const windowSpies = spiesOf(logger.window);
+    clearSpies(windowSpies);
     const m = new AccountViewManager();
     m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(0));
     m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1));
@@ -1681,6 +1684,9 @@ describe('AccountViewManager — log redaction', () => {
     m.dehydrateAccount(asAccountIndex(1));
     m.markAsBootstrap(asAccountIndex(99));
     m.destroyAll();
+    expect(logger.window.info).toHaveBeenCalledWith(
+      '[AccountViewManager] Destroyed all views and host window'
+    );
     getAccountViewManager();
     destroyAccountViewManager();
 
@@ -1691,14 +1697,12 @@ describe('AccountViewManager — log redaction', () => {
       '[AccountViewManager] Unregistered account 0',
       '[AccountViewManager] Unregistered account 1',
       '[AccountViewManager] Unregistered account 2',
-      '[AccountViewManager] Host window created'.replace(
-        'Host window created',
-        'Manager destroyed'
-      ),
+      '[AccountViewManager] Manager destroyed',
     ]);
     expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
       '[AccountViewManager] markAsBootstrap: account 99 not registered — ignored',
     ]);
     expectNoSentinels(spies, 5);
+    expectNoSentinels(windowSpies, 1);
   });
 });
