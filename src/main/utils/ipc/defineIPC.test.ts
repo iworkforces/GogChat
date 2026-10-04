@@ -27,8 +27,11 @@ const hoisted = vi.hoisted(() => {
 });
 
 vi.mock('electron', () => ({
+  app: { getVersion: () => 'test' },
   ipcMain: hoisted.ipcMain,
 }));
+
+vi.mock('../../../environment.js', () => ({ default: { isDev: false } }));
 
 vi.mock('./rateLimiter.js', () => ({
   getRateLimiter: () => ({ isAllowed: hoisted.isAllowed }),
@@ -51,7 +54,7 @@ import { IPC_CHANNELS } from '../../../shared/constants.js';
 
 function senderEvent(id: number) {
   return {
-    sender: { id },
+    sender: { id, isDestroyed: () => false },
     reply: vi.fn(),
   };
 }

@@ -803,6 +803,11 @@ describe('PerformanceMonitor', () => {
         kind: 'on',
       });
       expect(metrics.ipcLatencySamples![999]!.channel).toBe('channel-1000');
+      expect(
+        monitor
+          .getIpcLatencySamples()
+          .every((sample) => Number.isFinite(sample.durationMs) && sample.durationMs >= 0)
+      ).toBe(true);
     });
 
     it('records memory latency samples, exports them, and enforces FIFO cap', () => {
@@ -845,6 +850,15 @@ describe('PerformanceMonitor', () => {
       const metrics = monitor.exportToJSON();
       expect(metrics.ipcLatencySamples).toBeUndefined();
       expect(metrics.memoryLatencySamples).toBeUndefined();
+      expect(monitor.getIpcLatencySamples()).toEqual([]);
+    });
+
+    it('clears IPC samples on destruction on both the retired and next instances', () => {
+      const monitor = getPerformanceMonitor();
+      monitor.recordIpcLatency('channel', 3, { kind: 'fast' });
+      destroyPerformanceMonitor();
+      expect(monitor.getIpcLatencySamples()).toEqual([]);
+      expect(getPerformanceMonitor().getIpcLatencySamples()).toEqual([]);
     });
   });
 

@@ -47,6 +47,7 @@ This directory owns runtime lifecycle mechanics: feature execution, shared featu
 ### Buffers
 
 - Latency/renderer rings stay FIFO-capped. Do not grow unbounded arrays.
+- IPC handler execution samples come from async-chunk `ipc/defineIPC.ts`, use monotonic `performance.now()` durations and retain the monitor's `Date.now()`-based timestamp. The existing export/finalizer includes samples without changing schema version 1; `ipcLatencyP50` remains warn-only (5 ms). The IPC ring holds 1,000 samples; reset/destroy clears it, and in-flight handlers retain their entry instance rather than contaminating the next monitor.
 
 ## Cleanup contract
 

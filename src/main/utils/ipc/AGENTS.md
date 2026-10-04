@@ -28,7 +28,9 @@ Prefer `defineIPC({ kind: 'on' | 'reply' | 'invoke' })` for new handlers. `creat
 
 ## Latency sampling
 
-- IPC latency samples (when recorded) are optional export fields and remain **warn-only** in the perf budget until a real producer and baseline exist.
+- `defineIPC` and `registerFastHandler` record one monotonic handler-execution sample per executed call through spans in `defineIPC.ts` (async chunks only). Throws and rejections are sampled; rate-limit drops, validation failures and dedup joiners are not. Reply timing ends before `event.reply`.
+- Samples use the entry monitor from `getPerformanceMonitor()`, skip clocks when disabled, and resolve optional account identity through the non-constructing registry accessor, never the sender id. A late completion cannot populate a replacement monitor after destruction.
+- IPC samples remain optional export fields; `ipcLatencyP50` stays **warn-only**, budget 5 ms. These are not renderer/transport round trips. The TESTING-only main hook reads the real monitor for built-app tests.
 - Do not make IPC latency a gated CI metric without that baseline.
 
 ## Channel contract

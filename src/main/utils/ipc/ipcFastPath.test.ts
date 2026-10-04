@@ -20,11 +20,14 @@ function registeredListener(): (event: IpcMainEvent, data: unknown) => void {
 }
 
 vi.mock('electron', () => ({
+  app: { getVersion: () => 'test' },
   ipcMain: {
     on: (...args: unknown[]) => onMock(...args),
     removeListener: (...args: unknown[]) => removeListenerMock(...args),
   },
 }));
+
+vi.mock('../../../environment.js', () => ({ default: { isDev: false } }));
 
 vi.mock('./rateLimiter.js', () => ({
   getRateLimiter: () => ({ isAllowed: isAllowedMock }),
