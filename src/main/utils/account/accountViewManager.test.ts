@@ -279,12 +279,6 @@ vi.mock('../platform/windowUtils.js', () => ({
   })),
 }));
 
-vi.mock('../lifecycle/logger.js', () => ({
-  logger: {
-    window: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
-  },
-}));
-
 vi.mock('./accountSessionMaintenance.js', () => ({
   startSessionMaintenance: vi.fn(),
   stopSessionMaintenance: vi.fn(),
@@ -302,7 +296,6 @@ import {
 } from './accountViewManager.js';
 import { asAccountIndex, asWebContentsId } from '../../../shared/types/branded.js';
 import log from 'electron-log';
-import { logger } from '../lifecycle/logger.js';
 import {
   SECRET_AUTH_URL,
   SECRET_CHAT_URL,
@@ -1671,8 +1664,6 @@ describe('AccountViewManager — log redaction', () => {
   });
 
   it('keeps URL-free park, unpark, bootstrap and destroy messages', () => {
-    const windowSpies = spiesOf(logger.window);
-    clearSpies(windowSpies);
     const m = new AccountViewManager();
     m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(0));
     m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1));
@@ -1684,9 +1675,10 @@ describe('AccountViewManager — log redaction', () => {
     m.dehydrateAccount(asAccountIndex(1));
     m.markAsBootstrap(asAccountIndex(99));
     m.destroyAll();
-    expect(logger.window.info).toHaveBeenCalledWith(
-      '[AccountViewManager] Destroyed all views and host window'
-    );
+    expect(messagesAt(spies, 'info', '[Window] [AccountViewManager]')).toEqual([
+      '[Window] [AccountViewManager] Destroyed all views and host window',
+      '[Window] [AccountViewManager] Destroyed all views and host window',
+    ]);
     getAccountViewManager();
     destroyAccountViewManager();
 
@@ -1703,6 +1695,5 @@ describe('AccountViewManager — log redaction', () => {
       '[AccountViewManager] markAsBootstrap: account 99 not registered — ignored',
     ]);
     expectNoSentinels(spies, 5);
-    expectNoSentinels(windowSpies, 1);
   });
 });
