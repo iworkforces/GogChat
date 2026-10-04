@@ -45,7 +45,7 @@ function extractHostname(url: string): string {
   try {
     return new URL(url).hostname;
   } catch {
-    log.warn('[ExternalLinks] Failed to parse URL hostname:', url);
+    log.warn('[ExternalLinks] Failed to parse URL hostname');
     return '';
   }
 }
@@ -162,12 +162,12 @@ export function installExternalLinkGuards(
     const url = details.url;
 
     if (!isValidHttpURL(url)) {
-      log.warn('[ExternalLinks] Blocked non-HTTP URL:', url);
+      log.warn('[ExternalLinks] Blocked non-HTTP URL');
       return ACTION_DENIED;
     }
 
     if (!guardAgainstExternalLinks) {
-      log.debug('[ExternalLinks] Guard disabled, allowing:', url);
+      log.debug('[ExternalLinks] Guard disabled, allowing');
       return ACTION_ALLOWED;
     }
 
@@ -188,19 +188,19 @@ export function installExternalLinkGuards(
           try {
             const sanitizedURL = validateExternalURL(url);
             void openExternal(sanitizedURL);
-            log.info('[ExternalLinks] Opened external URL:', sanitizedURL);
-          } catch (error: unknown) {
-            log.error('[ExternalLinks] Failed to open external URL:', error);
+            log.info('[ExternalLinks] Opened external URL');
+          } catch {
+            log.error('[ExternalLinks] Failed to open external URL');
           }
         });
 
         return ACTION_DENIED;
       }
 
-      log.debug('[ExternalLinks] Allowing whitelisted navigation:', url);
+      log.debug('[ExternalLinks] Allowing whitelisted navigation');
       return ACTION_ALLOWED;
-    } catch (error: unknown) {
-      log.error('[ExternalLinks] Error handling redirect:', error);
+    } catch {
+      log.error('[ExternalLinks] Error handling redirect');
       return ACTION_DENIED;
     }
   };
@@ -208,7 +208,7 @@ export function installExternalLinkGuards(
   const onWillNavigate = (event: Electron.Event, url: string): void => {
     if (!isValidHttpURL(url)) {
       event.preventDefault();
-      log.warn('[ExternalLinks] will-navigate: blocked non-HTTP URL:', url);
+      log.warn('[ExternalLinks] will-navigate: blocked non-HTTP URL');
       return;
     }
 
@@ -230,9 +230,9 @@ export function installExternalLinkGuards(
         try {
           const sanitizedURL = validateExternalURL(url);
           void openExternal(sanitizedURL);
-          log.info('[ExternalLinks] will-navigate: Opened external URL:', sanitizedURL);
-        } catch (error: unknown) {
-          log.error('[ExternalLinks] will-navigate: Failed to open external URL:', error);
+          log.info('[ExternalLinks] will-navigate: Opened external URL');
+        } catch {
+          log.error('[ExternalLinks] will-navigate: Failed to open external URL');
         }
       });
     }
@@ -337,8 +337,8 @@ export function cleanupExternalLinks(): void {
     stopReGuardTimer();
     guardAgainstExternalLinks = true;
     log.info('[ExternalLinks] External links handler cleaned up');
-  } catch (error: unknown) {
-    log.error('[ExternalLinks] Failed to cleanup external links:', error);
+  } catch {
+    log.error('[ExternalLinks] Failed to cleanup external links');
   }
 }
 

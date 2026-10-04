@@ -35,20 +35,20 @@ function initiateAccountLoad(
       );
       return null;
     }
-  } catch (error: unknown) {
-    log.warn(`[AccountNavigation] getURL failed for account ${accountIndex}:`, error);
+  } catch {
+    log.warn(`[AccountNavigation] getURL failed for account ${accountIndex}`);
   }
 
   try {
     return webContents.loadURL(url).then(
       () => true,
-      (error: unknown) => {
-        log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}:`, error);
+      () => {
+        log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}`);
         return false;
       }
     );
-  } catch (error: unknown) {
-    log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}:`, error);
+  } catch {
+    log.warn(`[AccountNavigation] loadURL failed for account ${accountIndex}`);
     return null;
   }
 }

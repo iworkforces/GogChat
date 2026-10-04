@@ -22,6 +22,16 @@ import { AccountWindowRegistry } from './accountWindowRegistry';
 import { markAsBootstrap, clearAllBootstrap } from './bootstrapTracker';
 import { MockBrowserWindow } from '../../../../tests/mocks/electron';
 import type { BrowserWindow } from 'electron';
+import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -508,5 +518,127 @@ describe('routeAccountWindow — routing conformance schedules', () => {
     expect(result).toBe(hydrated);
     expect(order).toEqual(['hydrate', 'load:https://chat.google.com/u/2/room/abc']);
     expect(mockFactory.createWindow).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// routeAccountWindow — log redaction (every logging call, every level)
+// ---------------------------------------------------------------------------
+
+describe('routeAccountWindow — log redaction', () => {
+  const spies = spiesOf(log);
+  let registry: AccountWindowRegistry;
+  let mockFactory: ReturnType<typeof makeMockFactory>;
+
+  beforeEach(() => {
+    nextWebContentsId = 9800;
+    clearAllBootstrap();
+    clearSpies(spies);
+    registry = new AccountWindowRegistry();
+    mockFactory = makeMockFactory();
+  });
+
+  it('skips an existing mid-auth bootstrap window without logging the auth URL', () => {
+    const win = makeTypedWindow();
+    registry.registerWindow(win, 2);
+    (win as unknown as MockBrowserWindow).webContents.url = SECRET_AUTH_URL;
+    markAsBootstrap(2);
+    const loadURLSpy = vi.spyOn(win, 'loadURL');
+
+    routeAccountWindow(registry, mockFactory, SECRET_CHAT_URL, 2);
+
+    expect(loadURLSpy).not.toHaveBeenCalled();
+    expect(messagesAt(spies, 'info', '[AccountRouter]')).toEqual([
+      expect.stringContaining('[AccountRouter] Skipping loadURL for account 2'),
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('passes the original URL to loadURL for an existing window', () => {
+    const win = makeTypedWindow();
+    registry.registerWindow(win, 1);
+    const loadURLSpy = vi.spyOn(win, 'loadURL');
+
+    routeAccountWindow(registry, mockFactory, SECRET_CHAT_URL, 1);
+
+    expect(loadURLSpy).toHaveBeenCalledExactlyOnceWith(SECRET_CHAT_URL);
+    expect(messagesAt(spies, 'info', '[AccountRouter]')).toEqual([]);
+  });
+
+  it('logs the factory-created window with the original URL reaching the factory', () => {
+    const win = makeTypedWindow();
+    mockFactory.createWindow.mockReturnValue(win as unknown as Electron.BrowserWindow);
+
+    routeAccountWindow(registry, mockFactory, SECRET_CHAT_URL, 3, undefined, registerOn(registry));
+
+    expect(mockFactory.createWindow).toHaveBeenCalledExactlyOnceWith(
+      SECRET_CHAT_URL,
+      'persist:account-3'
+    );
+    expect(messagesAt(spies, 'info', '[AccountRouter]')).toEqual([
+      '[AccountRouter] Created account window 3 with partition: persist:account-3',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('logs a null hydration hook result and falls back to the factory with the original URL', () => {
+    const win = makeTypedWindow();
+    mockFactory.createWindow.mockReturnValue(win as unknown as Electron.BrowserWindow);
+
+    routeAccountWindow(
+      registry,
+      mockFactory,
+      SECRET_CHAT_URL,
+      4,
+      { isDehydrated: () => true, hydrate: () => null },
+      registerOn(registry)
+    );
+
+    expect(messagesAt(spies, 'warn', '[AccountRouter]')).toEqual([
+      expect.stringContaining('[AccountRouter] Hydration hook returned null for account 4'),
+    ]);
+    expect(mockFactory.createWindow).toHaveBeenCalledExactlyOnceWith(
+      SECRET_CHAT_URL,
+      'persist:account-4'
+    );
+    expectNoSentinels(spies);
+  });
+
+  it('skips post-hydrate loadURL mid-auth without logging the auth URL', () => {
+    const hydrated = makeTypedWindow();
+    (hydrated as unknown as MockBrowserWindow).webContents.url = SECRET_AUTH_URL;
+    markAsBootstrap(0);
+    const loadURLSpy = vi.spyOn(hydrated, 'loadURL');
+
+    routeAccountWindow(registry, mockFactory, SECRET_CHAT_URL, 0, {
+      isDehydrated: () => true,
+      hydrate: () => hydrated,
+    });
+
+    expect(loadURLSpy).not.toHaveBeenCalled();
+    expect(messagesAt(spies, 'info', '[AccountRouter]')).toEqual([
+      expect.stringContaining('[AccountRouter] Skipping post-hydrate loadURL for account 0'),
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('applies the original URL after hydrate when getURL throws a secret-bearing Error', () => {
+    const hydrated = makeTypedWindow();
+    const secretError = makeSecretError();
+    (hydrated as unknown as MockBrowserWindow).webContents.getURL = () => {
+      throw secretError;
+    };
+    const loadURLSpy = vi.spyOn(hydrated, 'loadURL');
+
+    routeAccountWindow(registry, mockFactory, SECRET_CHAT_URL, 0, {
+      isDehydrated: () => true,
+      hydrate: () => hydrated,
+    });
+
+    expect(loadURLSpy).toHaveBeenCalledExactlyOnceWith(SECRET_CHAT_URL);
+    expect(messagesAt(spies, 'warn', '[AccountRouter]')).toEqual([
+      expect.stringContaining('[AccountRouter] getURL failed after hydrate for account 0'),
+    ]);
+    expectNoSentinels(spies);
   });
 });

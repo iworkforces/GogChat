@@ -18,6 +18,12 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
+import {
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../tests/mocks/logCapture';
 
 // ─── Shared mock state ────────────────────────────────────────────────────────
 
@@ -576,5 +582,68 @@ describe('bootstrapPromotion feature', () => {
         expect.any(Error)
       );
     });
+  });
+});
+
+describe('bootstrapPromotion feature — log redaction', () => {
+  const AUTHENTICATED_SECRET_URL =
+    'https://chat.google.com/u/0/P2_PATH?token=P2_QUERY&continue=https%3A%2F%2Fx.example%2FP2_CONTINUE#P2_FRAGMENT';
+  let bootstrapAccounts: Set<number>;
+  let windowMap: Map<number, ReturnType<typeof makeFakeWindow>>;
+  let mgr: ReturnType<typeof makeFakeMgr>;
+  let account0Win: ReturnType<typeof makeFakeWindow>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    account0Win = makeFakeWindow();
+    bootstrapAccounts = new Set([0]);
+    windowMap = new Map([[0, account0Win]]);
+    mgr = makeFakeMgr(bootstrapAccounts, windowMap);
+    getAccountWindowManagerMock.mockReturnValue(mgr);
+  });
+
+  it('logs real authentication flow messages without the authenticated URL', async () => {
+    const spies = spiesOf((await import('electron-log')).default);
+    const feature = await import('./bootstrapPromotion.js');
+    feature.default();
+
+    account0Win.webContents.emit('did-navigate', {}, AUTHENTICATED_SECRET_URL);
+
+    expect(mgr.promoteBootstrap).toHaveBeenCalledExactlyOnceWith(0);
+    expect(messagesAt(spies, 'info')).toEqual([
+      '[BootstrapPromotion] Watching account-0 for authentication',
+      '[BootstrapPromotion] Feature initialized; watching accounts: 0',
+      '[BootstrapPromotion] Account-0 authenticated in main window',
+    ]);
+    expectNoSentinels(spies, 3);
+  });
+
+  it('logs the no-bootstrap skip', async () => {
+    const spies = spiesOf((await import('electron-log')).default);
+    bootstrapAccounts.clear();
+    const feature = await import('./bootstrapPromotion.js');
+    feature.default();
+
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[BootstrapPromotion] No bootstrap accounts — skipping',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('replaces an initialization Error carrying secrets with the fixed placeholder', async () => {
+    const spies = spiesOf((await import('electron-log')).default);
+    getAccountWindowManagerMock.mockImplementation(() => {
+      throw makeSecretError();
+    });
+    const feature = await import('./bootstrapPromotion.js');
+    feature.default();
+
+    const [message, logged] = spies.error.mock.calls[0] as [string, Error];
+    expect(message).toBe('[BootstrapPromotion] Failed to initialize:');
+    expect(logged.message).toBe('[redacted]');
+    expect(logged.stack).toBe('[redacted]');
+    expect(logged.cause).toBeUndefined();
+    expectNoSentinels(spies);
   });
 });

@@ -152,6 +152,13 @@ vi.mock('../utils/lifecycle/performanceFinalizer.js', () => ({
 }));
 
 import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../tests/mocks/logCapture';
 let registerAppReady: typeof RegisterAppReady;
 let closeStartupAdmission: typeof CloseStartupAdmission;
 
@@ -293,6 +300,65 @@ describe('registerAppReady characterization', () => {
     expect(mocks.app.quit).not.toHaveBeenCalled();
   });
 
+  it('logs a hard main-frame load failure without its description or URL', async () => {
+    await runReady();
+    await vi.waitFor(() => expect(mocks.didFailLoadListeners).toHaveLength(1));
+    const fail = mocks.didFailLoadListeners[0];
+
+    fail?.(
+      undefined,
+      -102,
+      `ERR_CONNECTION_REFUSED loading '${SECRET_AUTH_URL}'`,
+      SECRET_AUTH_URL,
+      true
+    );
+
+    expect(messagesAt(spiesOf(log), 'warn')).toEqual([
+      '[Main] Account-0 did-fail-load (non-terminal for metrics): code=-102',
+    ]);
+    expectNoSentinels(spiesOf(log));
+  });
+
+  it('logs an error-handler initialization failure without its Error and keeps starting', async () => {
+    mocks.initializeErrorHandler.mockImplementationOnce(() => {
+      throw makeSecretError();
+    });
+    await runReady();
+    await vi.waitFor(() => expect(mocks.initializeStore).toHaveBeenCalled());
+
+    expect(messagesAt(spiesOf(log), 'error')).toEqual([
+      '[Main] Failed to initialize error handler',
+    ]);
+    expect(mocks.app.quit).not.toHaveBeenCalled();
+    expectNoSentinels(spiesOf(log));
+  });
+
+  it('logs a store initialization failure and the fatal startup failure without their Errors', async () => {
+    mocks.initializeStore.mockRejectedValueOnce(makeSecretError());
+    await runReady();
+    await vi.waitFor(() => expect(mocks.app.quit).toHaveBeenCalledTimes(1));
+
+    expect(messagesAt(spiesOf(log), 'error')).toEqual([
+      '[Main] Failed to initialize critical phase or store',
+      '[Main] Failed to initialize application',
+    ]);
+    expectNoSentinels(spiesOf(log), 2);
+  });
+
+  it('logs a deferred-phase failure carrying secrets as the fixed placeholder Error', async () => {
+    mocks.runDeferredPhase.mockRejectedValueOnce(makeSecretError());
+    await runReady();
+    await vi.waitFor(() => expect(scheduledImmediates).toHaveLength(1));
+    flushImmediate();
+    await vi.waitFor(() => expect(log.error).toHaveBeenCalled());
+
+    expect(log.error).toHaveBeenCalledWith(
+      '[Main] Failed to initialize deferred features:',
+      expect.objectContaining({ message: '[redacted]', stack: '[redacted]' })
+    );
+    expectNoSentinels(spiesOf(log));
+  });
+
   it('schedules deferred work on setImmediate after the UI phase', async () => {
     await runReady();
     await vi.waitFor(() => expect(mocks.runPhase).toHaveBeenCalledWith('ui', expect.anything()));
@@ -328,7 +394,7 @@ describe('registerAppReady characterization', () => {
     await vi.waitFor(() =>
       expect(log.error).toHaveBeenCalledWith(
         '[Main] Failed to initialize deferred features:',
-        error
+        expect.objectContaining({ message: '[redacted]', stack: '[redacted]' })
       )
     );
 
@@ -451,7 +517,7 @@ describe('registerAppReady characterization', () => {
     await vi.waitFor(() =>
       expect(log.error).toHaveBeenCalledWith(
         '[Main] Failed to initialize deferred features:',
-        error
+        expect.objectContaining({ message: '[redacted]', stack: '[redacted]' })
       )
     );
     expect(mocks.app.quit).not.toHaveBeenCalled();

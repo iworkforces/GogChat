@@ -288,6 +288,16 @@ import type { WindowFactory } from '../../../shared/types/window';
 import { asType } from '../../../shared/typeUtils.js';
 import * as accountHooks from './accountWebContentsHooks.js';
 import { getEventListeners } from 'node:events';
+import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 import { getCleanupManager } from '../lifecycle/resourceCleanup.js';
 import * as resourceCleanup from '../lifecycle/resourceCleanup.js';
 import { startSessionMaintenance, stopSessionMaintenance } from './accountSessionMaintenance.js';
@@ -1538,5 +1548,91 @@ describe('AccountWindowManager permanent removal hooks', () => {
     isolated.destroyAll();
 
     expect(removed).not.toHaveBeenCalled();
+  });
+});
+
+describe('AccountWindowManager — log redaction', () => {
+  const spies = spiesOf(log);
+  const PREFIX = '[AccountWindowManager]';
+
+  beforeEach(() => {
+    clearSpies(spies);
+  });
+
+  it('logs dehydrate and hydrate without the snapshot URL while the factory still receives it', () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1));
+
+    m.dehydrateAccount(asAccountIndex(1));
+    factory.createWindow.mockClear();
+    const restored = m.hydrateAccount(asAccountIndex(1));
+
+    expect(restored).not.toBeNull();
+    expect(factory.createWindow).toHaveBeenCalledExactlyOnceWith(
+      SECRET_AUTH_URL,
+      toPartition(asAccountIndex(1))
+    );
+    expect(messagesAt(spies, 'info', PREFIX)).toEqual([
+      '[AccountWindowManager] Dehydrating account 1',
+      '[AccountWindowManager] Hydrated account 1 (partition=persist:account-1)',
+    ]);
+    expectNoSentinels(spies, 2);
+  });
+
+  it('logs a focusAccount hydrate failure without its secret-bearing Error', () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(1));
+    m.dehydrateAccount(asAccountIndex(1));
+    factory.createWindow.mockImplementation(() => {
+      throw makeSecretError();
+    });
+    clearSpies(spies);
+
+    expect(() => m.focusAccount(asAccountIndex(1))).not.toThrow();
+
+    expect(factory.createWindow).toHaveBeenLastCalledWith(
+      SECRET_CHAT_URL,
+      toPartition(asAccountIndex(1))
+    );
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountWindowManager] focusAccount hydrate failed for 1',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('keeps URL-free lifecycle messages for state save, bootstrap guards and teardown', () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1));
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(2));
+
+    m.saveAccountWindowState(asAccountIndex(1));
+    m.markAsBootstrap(asAccountIndex(99));
+    m.markAsBootstrap(asAccountIndex(2));
+    m.dehydrateAccount(asAccountIndex(2));
+    m.destroyAll();
+    getAccountWindowManager(factory);
+    destroyAccountWindowManager();
+
+    expect(messagesAt(spies, 'debug', PREFIX)).toEqual([
+      '[AccountWindowManager] Saved state for account 1',
+      '[AccountWindowManager] dehydrateAccount: skipped bootstrap account 2',
+    ]);
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountWindowManager] markAsBootstrap: account 99 not registered — ignored',
+    ]);
+    expect(messagesAt(spies, 'info', PREFIX)).toContain('[AccountWindowManager] Manager destroyed');
+    expectNoSentinels(spies, 4);
+  });
+
+  it('logs the WebContentsView backend selection without URLs', () => {
+    h.mockStore['app'] = { useWebContentsView: true };
+    getAccountWindowManager(makeFactory());
+    expect(messagesAt(spies, 'info', PREFIX)).toEqual([
+      '[AccountWindowManager] Using WebContentsView backend (app.useWebContentsView=true)',
+    ]);
+    expectNoSentinels(spies);
   });
 });

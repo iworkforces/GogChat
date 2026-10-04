@@ -16,6 +16,16 @@ vi.mock('../../../shared/urlValidators.js', () => ({
 
 import { isGoogleAuthUrl } from '../../../shared/urlValidators.js';
 import * as navigation from './accountNavigation.js';
+import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture.js';
 
 function makeManager(
   wc: {
@@ -212,5 +222,79 @@ describe('accountNavigation', () => {
       );
       expect(loadURL).toHaveBeenCalledWith('https://chat.google.com/u/2/room/x');
     });
+  });
+});
+
+describe('accountNavigation — log redaction', () => {
+  const spies = spiesOf(log);
+  const account = asAccountIndex(2);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(isGoogleAuthUrl).mockReturnValue(false);
+    clearSpies(spies);
+  });
+
+  function liveWebContents(overrides: Record<string, unknown> = {}) {
+    return {
+      isDestroyed: () => false,
+      getURL: () => 'https://chat.google.com/u/2',
+      loadURL: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  it('logs a missing live WebContents at debug level without a URL', () => {
+    expect(loadAccountURL(makeManager(null), account, SECRET_CHAT_URL)).toBe(false);
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[AccountNavigation] loadAccountURL: no live WebContents for account 2',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('logs the auth-page skip without the auth URL and never loads', () => {
+    vi.mocked(isGoogleAuthUrl).mockReturnValue(true);
+    const wc = liveWebContents({ getURL: () => SECRET_AUTH_URL });
+    expect(loadAccountURL(makeManager(wc), account, SECRET_CHAT_URL)).toBe(false);
+    expect(isGoogleAuthUrl).toHaveBeenCalledExactlyOnceWith(SECRET_AUTH_URL);
+    expect(wc.loadURL).not.toHaveBeenCalled();
+    expect(messagesAt(spies, 'info')).toEqual([
+      expect.stringContaining('[AccountNavigation] Skipping loadURL for account 2'),
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('keeps loading the original URL when getURL throws a secret-bearing Error', () => {
+    const wc = liveWebContents({
+      getURL: () => {
+        throw makeSecretError();
+      },
+    });
+    expect(loadAccountURL(makeManager(wc), account, SECRET_CHAT_URL)).toBe(true);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(SECRET_CHAT_URL);
+    expect(messagesAt(spies, 'warn')).toEqual(['[AccountNavigation] getURL failed for account 2']);
+    expectNoSentinels(spies);
+  });
+
+  it('logs an asynchronous load rejection without its Error', async () => {
+    const wc = liveWebContents({ loadURL: vi.fn().mockRejectedValue(makeSecretError()) });
+    await expect(
+      navigation.loadAccountURLAndWait(makeManager(wc), account, SECRET_CHAT_URL)
+    ).resolves.toBe(false);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(SECRET_CHAT_URL);
+    expect(messagesAt(spies, 'warn')).toEqual(['[AccountNavigation] loadURL failed for account 2']);
+    expectNoSentinels(spies);
+  });
+
+  it('logs a synchronous load throw without its Error', () => {
+    const wc = liveWebContents({
+      loadURL: vi.fn(() => {
+        throw makeSecretError();
+      }),
+    });
+    expect(loadAccountURL(makeManager(wc), account, SECRET_CHAT_URL)).toBe(false);
+    expect(messagesAt(spies, 'warn')).toEqual(['[AccountNavigation] loadURL failed for account 2']);
+    expectNoSentinels(spies);
   });
 });

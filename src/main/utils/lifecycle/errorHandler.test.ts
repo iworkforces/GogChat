@@ -9,6 +9,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  SECRET_AUTH_URL,
+  expectNoSentinels,
+  makeSecretError,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 
 // Mock electron first - must come before any imports that use electron
 vi.mock('electron', () => ({
@@ -523,5 +529,92 @@ describe('destroyErrorHandler', () => {
       destroyErrorHandler();
     }).not.toThrow();
     expect(getErrorHandler()).toBeTruthy();
+  });
+});
+
+describe('ErrorHandler — log redaction', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  async function installHandlers(gracefulShutdown: boolean) {
+    const { getErrorHandler } = await import('./errorHandler');
+    const spies = spiesOf((await import('electron-log')).default);
+    const handler = getErrorHandler({ gracefulShutdown });
+    const push = handler.pushContext({
+      feature: 'externalLinks',
+      phase: 'ui',
+      operation: 'navigate',
+      metadata: { url: SECRET_AUTH_URL },
+    });
+    handler.initialize();
+    spies.error.mockClear();
+    const rejection = (
+      process.listeners('unhandledRejection') as Array<(...a: unknown[]) => void>
+    ).at(-1)!;
+    const exception = (
+      process.listeners('uncaughtException') as Array<(...a: unknown[]) => void>
+    ).at(-1)!;
+    process.off('unhandledRejection', rejection);
+    process.off('uncaughtException', exception);
+    return { spies, rejection, exception, push };
+  }
+
+  it.each([
+    ['an Error with URLs in message, stack and cause', makeSecretError()],
+    ['a string reason carrying a URL', `rejected ${SECRET_AUTH_URL}`],
+    ['an object reason carrying a URL', { url: SECRET_AUTH_URL }],
+  ])('logs an unhandled rejection with %s as a fixed Error', async (_label, reason) => {
+    const { spies, rejection, push } = await installHandlers(false);
+
+    rejection(reason, Promise.resolve());
+
+    expect(spies.error).toHaveBeenCalledTimes(1);
+    const [message, logged] = spies.error.mock.calls[0] as [string, Error];
+    expect(message).toBe('[ErrorHandler] Unhandled Promise Rejection:');
+    expect(logged).toBeInstanceOf(Error);
+    expect(logged.message).toBe('[redacted]');
+    expect(logged.stack).toBe('[redacted]');
+    expect(logged.cause).toBeUndefined();
+    expectNoSentinels(spies);
+    push();
+  });
+
+  it('logs an uncaught exception as a fixed Error and still schedules the graceful quit', async () => {
+    vi.useFakeTimers();
+    try {
+      const { spies, exception, push } = await installHandlers(true);
+      const electron = await import('electron');
+
+      exception(makeSecretError());
+
+      const calls = spies.error.mock.calls as Array<[string, Error?]>;
+      expect(calls.map(([message]) => message)).toEqual([
+        '[ErrorHandler] Uncaught Exception:',
+        '[ErrorHandler] Critical error, initiating graceful shutdown',
+      ]);
+      expect(calls[0]?.[1]?.message).toBe('[redacted]');
+      expect(calls[0]?.[1]?.stack).toBe('[redacted]');
+      expectNoSentinels(spies, 2);
+      expect(electron.app.quit).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1000);
+      expect(electron.app.quit).toHaveBeenCalledTimes(1);
+      push();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not quit on an uncaught exception when graceful shutdown is off', async () => {
+    const { spies, exception, push } = await installHandlers(false);
+    const electron = await import('electron');
+
+    exception(makeSecretError());
+
+    expect(spies.error).toHaveBeenCalledTimes(1);
+    expect(electron.app.quit).not.toHaveBeenCalled();
+    expectNoSentinels(spies);
+    push();
   });
 });

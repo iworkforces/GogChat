@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import log from 'electron-log';
 import { DEEP_LINK } from '../../shared/constants.js';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import {
   isAuthenticatedChatUrl,
   isGoogleAuthUrl,
@@ -34,22 +35,13 @@ function getAccountIndexFromUrl(url: string) {
   }
 }
 
-function sanitizeUrlForLog(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.protocol}//${parsed.hostname}${parsed.pathname}${parsed.search ? '?[redacted]' : ''}`;
-  } catch {
-    return '[invalid-url]';
-  }
-}
-
 export function processDeepLink(url: string): void {
   try {
-    log.info(`[DeepLink] Received deep link: ${sanitizeUrlForLog(url)}`);
+    log.info('[DeepLink] Received deep link');
     const validatedUrl = validateDeepLinkURL(url);
     navigateToUrl(validatedUrl);
   } catch (error: unknown) {
-    log.error('[DeepLink] Failed to process deep link:', error);
+    log.error('[DeepLink] Failed to process deep link:', sanitizeLogError(error));
   }
 }
 
@@ -133,7 +125,7 @@ function navigateToUrl(url: string): void {
   }
 
   if (currentUrl !== url) {
-    log.info(`[DeepLink] Navigating to: ${sanitizeUrlForLog(url)}`);
+    log.info('[DeepLink] Navigating to');
     if (!loadAccountURL(manager, accountIndex, url)) {
       pendingDeepLinkUrl = url;
       log.info('[DeepLink] loadAccountURL skipped, buffering URL');
@@ -157,10 +149,10 @@ function processPendingDeepLink(): void {
 function openInDefaultBrowser(url: string): void {
   try {
     const sanitizedUrl = validateExternalURL(url);
-    log.info(`[DeepLink] Opening external URL in default browser: ${sanitizeUrlForLog(url)}`);
+    log.info('[DeepLink] Opening external URL in default browser');
     void openExternal(sanitizedUrl);
   } catch (error: unknown) {
-    log.error('[DeepLink] Failed to open external URL:', error);
+    log.error('[DeepLink] Failed to open external URL:', sanitizeLogError(error));
   }
 }
 
@@ -172,14 +164,14 @@ export function setupDeepLinkListener(): void {
 
   const handler = (event: Electron.Event, url: string): void => {
     event.preventDefault();
-    log.info(`[DeepLink] open-url event: ${sanitizeUrlForLog(url)}`);
+    log.info('[DeepLink] open-url event');
 
     if (url.startsWith(DEEP_LINK.PREFIX) || url.startsWith('https://chat.google.com')) {
       processDeepLink(url);
     } else if (url.startsWith('https://')) {
       openInDefaultBrowser(url);
     } else {
-      log.warn(`[DeepLink] Ignoring unrecognized URL scheme: ${sanitizeUrlForLog(url)}`);
+      log.warn('[DeepLink] Ignoring unrecognized URL scheme');
     }
   };
 
@@ -213,7 +205,7 @@ function registerProtocolClient(protocol: string): void {
       log.error(`[DeepLink] Failed to register as default protocol client for ${protocol}://`);
     }
   } catch (error: unknown) {
-    log.error('[DeepLink] Error registering protocol client:', error);
+    log.error('[DeepLink] Error registering protocol client:', sanitizeLogError(error));
   }
 }
 
@@ -239,7 +231,7 @@ export default function initDeepLinkHandler(_context: {
       handler: (url: string) => processDeepLink(url),
     });
   } catch (error: unknown) {
-    log.error('[DeepLink] Failed to initialize deep link handler:', error);
+    log.error('[DeepLink] Failed to initialize deep link handler:', sanitizeLogError(error));
   }
 }
 
@@ -251,6 +243,6 @@ export function cleanupDeepLinkHandler(): void {
     // No longer clearing windowRef since we use dynamic lookup
     log.info('[DeepLink] Deep link handler cleaned up');
   } catch (error: unknown) {
-    log.error('[DeepLink] Failed to cleanup:', error);
+    log.error('[DeepLink] Failed to cleanup:', sanitizeLogError(error));
   }
 }

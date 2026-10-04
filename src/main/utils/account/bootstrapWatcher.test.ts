@@ -45,6 +45,16 @@ vi.mock('./accountWindowManager.js', () => ({
 
 // ──── Import under test ────────────────────────────────────────────────────
 import { watchBootstrapAccount, cleanupBootstrapPromotion } from './bootstrapWatcher';
+import { loadAccountURL } from './accountNavigation.js';
+import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 
 // ──── Helpers ──────────────────────────────────────────────────────────────
 
@@ -778,5 +788,151 @@ describe('bootstrapWatcher', () => {
         expect.any(Error)
       );
     });
+  });
+});
+
+describe('bootstrapWatcher — log redaction', () => {
+  const spies = spiesOf(mockLog);
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    cleanupBootstrapPromotion();
+    vi.resetAllMocks();
+    clearSpies(spies);
+    mockIsAuthenticatedChatUrl.mockImplementation(
+      (url: unknown) =>
+        typeof url === 'string' && url.startsWith('https://P2_USERINFO:P2_USERINFO@chat.')
+    );
+  });
+
+  function watch(accountIndex: number) {
+    const win = createMockBrowserWindow();
+    const promoteBootstrap = vi.fn();
+    const mgr = createMockManager({
+      isBootstrap: () => true,
+      getAccountWindow: () => win,
+      promoteBootstrap,
+    });
+    mockGetAccountWindowManager.mockReturnValue(mgr);
+    const cleanup = watchBootstrapAccount(accountIndex);
+    return { win, mgr, promoteBootstrap, cleanup };
+  }
+
+  it('logs main-window authentication without the URL; the validator and promotion get the original', () => {
+    const { win, promoteBootstrap } = watch(2);
+
+    win.webContents._emit('did-navigate', {}, SECRET_AUTH_URL);
+    expect(mockIsAuthenticatedChatUrl).toHaveBeenLastCalledWith(SECRET_AUTH_URL);
+    expect(promoteBootstrap).not.toHaveBeenCalled();
+
+    win.webContents._emit('did-navigate', {}, SECRET_CHAT_URL);
+
+    expect(mockIsAuthenticatedChatUrl).toHaveBeenLastCalledWith(SECRET_CHAT_URL);
+    expect(promoteBootstrap).toHaveBeenCalledExactlyOnceWith(2);
+    expect(messagesAt(spies, 'info')).toEqual([
+      '[BootstrapPromotion] Watching account-2 for authentication',
+      '[BootstrapPromotion] Account-2 authenticated in main window',
+    ]);
+    expectNoSentinels(spies, 2);
+  });
+
+  it('logs popup authentication on account 0 without the URL; loadAccountURL gets the original', () => {
+    const { win, mgr, promoteBootstrap } = watch(0);
+    const child = createMockBrowserWindow();
+
+    win.webContents._emit('did-create-window', child, {});
+    child.webContents._emit('did-navigate', {}, SECRET_AUTH_URL);
+    child.webContents._emit('did-navigate', {}, SECRET_CHAT_URL);
+
+    expect(mockIsAuthenticatedChatUrl).toHaveBeenLastCalledWith(SECRET_CHAT_URL);
+    expect(loadAccountURL).toHaveBeenCalledExactlyOnceWith(mgr, 0, SECRET_CHAT_URL);
+    expect(promoteBootstrap).toHaveBeenCalledExactlyOnceWith(0);
+    expect(child.destroy).toHaveBeenCalledTimes(1);
+    expect(messagesAt(spies, 'info')).toEqual([
+      '[BootstrapPromotion] Watching account-0 for authentication',
+      '[BootstrapPromotion] Account-0 authenticated via child window',
+    ]);
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[BootstrapPromotion] Account-0 child window created — watching for auth redirect',
+      '[BootstrapPromotion] Closing account-0 child auth window after promotion',
+    ]);
+    expectNoSentinels(spies, 4);
+  });
+
+  it('logs popup authentication on another account without loading the URL', () => {
+    const { win, promoteBootstrap } = watch(3);
+    const child = createMockBrowserWindow();
+
+    win.webContents._emit('did-create-window', child, {});
+    child.webContents._emit('did-navigate', {}, SECRET_CHAT_URL);
+
+    expect(loadAccountURL).not.toHaveBeenCalled();
+    expect(promoteBootstrap).toHaveBeenCalledExactlyOnceWith(3);
+    expect(messagesAt(spies, 'info')).toContain(
+      '[BootstrapPromotion] Account-3 authenticated via child window'
+    );
+    expectNoSentinels(spies, 3);
+  });
+
+  it('keeps listener attach and detach behavior while logging window close and cleanup', () => {
+    const { win, cleanup } = watch(1);
+    expect(win.webContents.on.mock.calls.map(([event]) => event)).toEqual([
+      'did-navigate',
+      'did-create-window',
+    ]);
+
+    win._emitOnce('closed');
+    cleanup();
+
+    expect(win.webContents.removeListener.mock.calls.map(([event]) => event).sort()).toEqual([
+      'did-create-window',
+      'did-create-window',
+      'did-navigate',
+      'did-navigate',
+    ]);
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[BootstrapPromotion] Account-1 window closed — listeners removed',
+      '[BootstrapPromotion] Cleaned up bootstrap promotion listeners for account-1',
+    ]);
+    expectNoSentinels(spies, 3);
+  });
+
+  it('logs the skip paths for a non-bootstrap account and a missing WebContents', () => {
+    mockGetAccountWindowManager.mockReturnValue(
+      createMockManager({ isBootstrap: () => false, getAccountWindow: () => null })
+    );
+    watchBootstrapAccount(4);
+    mockGetAccountWindowManager.mockReturnValue(
+      createMockManager({ isBootstrap: () => true, getAccountWindow: () => null })
+    );
+    watchBootstrapAccount(5);
+
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[BootstrapPromotion] Account-4 is not a bootstrap window — skipping',
+    ]);
+    expect(messagesAt(spies, 'warn')).toEqual([
+      '[BootstrapPromotion] Account-5 WebContents not found — skipping',
+    ]);
+    expectNoSentinels(spies, 2);
+  });
+
+  it('logs the global cleanup and replaces a failing cleanup Error with the fixed placeholder', () => {
+    watch(1);
+    cleanupBootstrapPromotion();
+    expect(messagesAt(spies, 'debug')).toContain('[BootstrapPromotion] Cleanup complete');
+
+    watch(1);
+    mockLog.debug.mockImplementation(() => {
+      throw makeSecretError();
+    });
+    cleanupBootstrapPromotion();
+
+    const [message, logged] = mockLog.error.mock.calls[0] as [string, Error];
+    expect(message).toBe('[BootstrapPromotion] Failed to cleanup:');
+    expect(logged).toBeInstanceOf(Error);
+    expect(logged.message).toBe('[redacted]');
+    expect(logged.stack).toBe('[redacted]');
+    expect(logged.cause).toBeUndefined();
+    expectNoSentinels(spies, 2);
   });
 });

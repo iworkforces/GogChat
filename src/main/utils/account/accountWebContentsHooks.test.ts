@@ -1,7 +1,19 @@
 /**
  * Unit tests for multi-account WebContents hooks (KD13).
  */
+vi.mock('electron-log', () => ({
+  default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import log from 'electron-log';
+import {
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 import { asAccountIndex } from '../../../shared/types/branded.js';
 import {
   clearAccountWebContentsHooksForTests,
@@ -130,5 +142,78 @@ describe('accountWebContentsHooks', () => {
     notifyAccountRemoved(asAccountIndex(2));
 
     expect(removed).not.toHaveBeenCalled();
+  });
+});
+
+describe('accountWebContentsHooks — log redaction', () => {
+  const spies = spiesOf(log);
+  const wc = { id: 3, isDestroyed: () => false } as unknown as Electron.WebContents;
+  const created = {
+    accountIndex: asAccountIndex(1),
+    webContents: wc,
+    backend: 'browser-window' as const,
+  };
+
+  beforeEach(() => {
+    clearAccountWebContentsHooksForTests();
+    clearSpies(spies);
+  });
+
+  it('logs a failed backfill without its Error and still subscribes the listener', () => {
+    setAccountWebContentsHooksManager({
+      enumerateAccountWebContents: () => {
+        throw makeSecretError();
+      },
+    } as never);
+    const disposer = vi.fn();
+    const listener = vi.fn(() => disposer);
+
+    const unsubscribe = onAccountWebContentsCreated(listener);
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(messagesAt(spies, 'warn')).toEqual(['[AccountWebContentsHooks] Backfill failed']);
+    expectNoSentinels(spies);
+
+    notifyAccountWebContentsCreated(created);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    expect(disposer).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a failing create listener without its Error, keeping attach/detach behavior', () => {
+    const disposer = vi.fn();
+    const failing = vi.fn(() => {
+      throw makeSecretError();
+    });
+    const healthy = vi.fn(() => disposer);
+    onAccountWebContentsCreated(failing);
+    onAccountWebContentsCreated(healthy);
+
+    notifyAccountWebContentsCreated(created);
+
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(healthy).toHaveBeenCalledTimes(1);
+    expect(messagesAt(spies, 'error')).toEqual(['[AccountWebContentsHooks] Listener failed']);
+    expectNoSentinels(spies);
+
+    notifyAccountWebContentsDestroyed(asAccountIndex(1));
+    notifyAccountWebContentsDestroyed(asAccountIndex(1));
+    expect(disposer).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a failing removal listener without its Error and still calls later listeners', () => {
+    onAccountRemoved(() => {
+      throw makeSecretError();
+    });
+    const next = vi.fn();
+    onAccountRemoved(next);
+
+    notifyAccountRemoved(asAccountIndex(4));
+
+    expect(next).toHaveBeenCalledExactlyOnceWith(asAccountIndex(4));
+    expect(messagesAt(spies, 'error')).toEqual([
+      '[AccountWebContentsHooks] Removal listener failed',
+    ]);
+    expectNoSentinels(spies);
   });
 });

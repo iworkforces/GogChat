@@ -29,6 +29,7 @@
  */
 
 import log from 'electron-log';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import { getAccountWindowManager } from '../utils/account/accountWindowManager.js';
 import {
   watchBootstrapAccount,
@@ -58,6 +59,6 @@ export default function init(): void {
       `[BootstrapPromotion] Feature initialized; watching accounts: ${bootstrapIndices.join(', ')}`
     );
   } catch (error: unknown) {
-    log.error('[BootstrapPromotion] Failed to initialize:', error);
+    log.error('[BootstrapPromotion] Failed to initialize:', sanitizeLogError(error));
   }
 }
