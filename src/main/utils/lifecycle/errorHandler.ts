@@ -13,6 +13,7 @@
 import { app } from 'electron';
 import log from 'electron-log';
 import type Store from 'electron-store';
+import { sanitizeLogError } from '../../../shared/logSanitizer.js';
 import type { StoreType } from '../../../shared/types/config.js';
 
 /**
@@ -87,15 +88,7 @@ class ErrorHandler {
    * Handle unhandled promise rejections
    */
   private handleUnhandledRejection(reason: unknown, _promise: Promise<unknown>): void {
-    const context = this.getCurrentContext();
-    const errorMessage = reason instanceof Error ? reason.message : String(reason);
-    const stack = reason instanceof Error ? reason.stack : undefined;
-
-    log.error('[ErrorHandler] Unhandled Promise Rejection:', {
-      reason: errorMessage,
-      stack,
-      context,
-    });
+    log.error('[ErrorHandler] Unhandled Promise Rejection:', sanitizeLogError(reason));
 
     // Don't quit on unhandled rejections, just log them
     // The app should continue running
@@ -105,13 +98,7 @@ class ErrorHandler {
    * Handle uncaught exceptions
    */
   private handleUncaughtException(error: Error): void {
-    const context = this.getCurrentContext();
-
-    log.error('[ErrorHandler] Uncaught Exception:', {
-      message: error.message,
-      stack: error.stack,
-      context,
-    });
+    log.error('[ErrorHandler] Uncaught Exception:', sanitizeLogError(error));
 
     // Graceful shutdown on critical errors
     if (this.config.gracefulShutdown) {
@@ -148,13 +135,6 @@ class ErrorHandler {
    */
   private popContext(): void {
     this.errorContextStack.pop();
-  }
-
-  /**
-   * Get the current error context (top of stack)
-   */
-  private getCurrentContext(): ErrorContext | undefined {
-    return this.errorContextStack[this.errorContextStack.length - 1];
   }
 
   /**

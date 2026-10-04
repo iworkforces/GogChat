@@ -20,6 +20,10 @@
 
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 import { ipcMain } from 'electron';
+import type { IPCLatencySample } from '../lifecycle/performanceTypes.js';
+import { getPerformanceMonitor } from '../lifecycle/performanceMonitor.js';
+import { getSharedFeatureContext } from '../lifecycle/featureContextStore.js';
+import { asWebContentsId } from '../../../shared/types/branded.js';
 
 import type { IPCChannelName } from '../../../shared/constants.js';
 import type { IPCResponse } from '../../../shared/types/ipc.js';
@@ -29,6 +33,56 @@ import { IPCError } from '../lifecycle/errors.js';
 import { logger } from '../lifecycle/logger.js';
 import { getDeduplicator } from './ipcDeduplicator.js';
 import { getRateLimiter } from './rateLimiter.js';
+
+type HandlerSpan = {
+  readonly channel: IPCChannelName;
+  readonly kind: NonNullable<IPCLatencySample['kind']>;
+  readonly event: IpcMainEvent | IpcMainInvokeEvent;
+};
+
+export function startIPCHandlerSpan(span: HandlerSpan): (() => void) | undefined {
+  const monitor = getPerformanceMonitor();
+  if (!monitor.isEnabled()) return undefined;
+  const sender = span.event.sender;
+  const accountIndex =
+    !sender || sender.isDestroyed()
+      ? null
+      : getSharedFeatureContext().accountWindowManager?.getAccountForWebContents(
+          asWebContentsId(sender.id)
+        );
+  const options = { kind: span.kind, ...(accountIndex == null ? {} : { accountIndex }) };
+  const started = performance.now();
+  // Keep the entry instance: a late completion cannot populate its replacement after shutdown.
+  return () => monitor.recordIpcLatency(span.channel, performance.now() - started, options);
+}
+
+export function runIPCHandler<T>(span: HandlerSpan, handler: () => T | Promise<T>): T | Promise<T> {
+  const finish = startIPCHandlerSpan(span);
+  if (!finish) return handler();
+  let pending = false;
+  try {
+    const result = handler();
+    const thenable = asType<PromiseLike<T>>(result);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- Rereads change accessor thenables' await semantics; call restores this.
+    const then = result == null ? undefined : thenable.then;
+    if (typeof then === 'function') {
+      pending = true;
+      return new Promise<T>((resolve, reject) => {
+        then.call(thenable, resolve, reject);
+      }).finally(finish);
+    }
+    return result;
+  } finally {
+    if (!pending) finish();
+  }
+}
+
+if (process.env['TESTING'] === 'true') {
+  const testGlobal = asType<
+    typeof globalThis & { __gogchatIPCPerformance?: typeof getPerformanceMonitor }
+  >(globalThis);
+  testGlobal.__gogchatIPCPerformance = getPerformanceMonitor;
+}
 
 /** Common config fields shared by all `defineIPC` variants. */
 interface DefineIPCBase<T> {
@@ -202,10 +256,19 @@ export function defineIPC<T, R = void>(config: DefineIPCConfig<T, R>): DefineIPC
     case 'on': {
       const { handler } = config;
       const listener = (event: IpcMainEvent, data: unknown) => {
-        void runPipeline<T, void>(config, data, event, (validated) => handler(validated, event), {
-          debugLabel: 'Handling ',
-          errorLabel: 'Handler failed: ',
-        });
+        void runPipeline<T, void>(
+          config,
+          data,
+          event,
+          (validated) =>
+            runIPCHandler({ channel: config.channel, kind: 'on', event }, () =>
+              handler(validated, event)
+            ),
+          {
+            debugLabel: 'Handling ',
+            errorLabel: 'Handler failed: ',
+          }
+        );
       };
       ipcMain.on(config.channel, listener);
       return () => {
@@ -222,7 +285,10 @@ export function defineIPC<T, R = void>(config: DefineIPCConfig<T, R>): DefineIPC
           data,
           event,
           async (validated) => {
-            const response = await handler(validated, event);
+            const response = await runIPCHandler(
+              { channel: config.channel, kind: 'reply', event },
+              () => handler(validated, event)
+            );
             event.reply(responseChannel, {
               success: true,
               data: response,
@@ -259,7 +325,10 @@ export function defineIPC<T, R = void>(config: DefineIPCConfig<T, R>): DefineIPC
           config,
           data,
           event,
-          (validated) => handler(validated, event),
+          (validated) =>
+            runIPCHandler({ channel: config.channel, kind: 'invoke', event }, () =>
+              handler(validated, event)
+            ),
           {
             debugLabel: 'Handling invoke ',
             errorLabel: 'Invoke handler failed: ',

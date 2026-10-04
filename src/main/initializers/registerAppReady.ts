@@ -10,6 +10,7 @@
 
 import { app, session, type BrowserWindow } from 'electron';
 import log from 'electron-log';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import { perfMonitor } from '../utils/lifecycle/performanceMonitor.js';
 import { initializeErrorHandler } from '../utils/lifecycle/errorHandler.js';
 
@@ -85,8 +86,8 @@ export function registerAppReady(options: AppReadyOptions): void {
           gracefulShutdown: true,
         });
         log.info('[Main] Centralized error handler initialized');
-      } catch (error: unknown) {
-        log.error('[Main] Failed to initialize error handler:', error);
+      } catch {
+        log.error('[Main] Failed to initialize error handler');
       }
 
       // Register global cleanups + security phase in parallel:
@@ -117,7 +118,7 @@ export function registerAppReady(options: AppReadyOptions): void {
         if (!isStartupAdmissionOpen()) return;
         log.info('[Main] Config store initialized');
       } catch (error: unknown) {
-        log.error('[Main] Failed to initialize critical phase or store:', error);
+        log.error('[Main] Failed to initialize critical phase or store');
         throw error;
       }
 
@@ -191,12 +192,12 @@ export function registerAppReady(options: AppReadyOptions): void {
         // timeouts still mark the run invalid via the finalizer.
         account0Wc.on(
           'did-fail-load',
-          (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+          (_event, errorCode, _errorDescription, _validatedURL, isMainFrame) => {
             if (!isStartupAdmissionOpen()) return;
             if (!isMainFrame) return;
             if (errorCode === -3 /* ERR_ABORTED */) return;
             log.warn(
-              `[Main] Account-0 did-fail-load (non-terminal for metrics): code=${errorCode}: ${errorDescription}`
+              `[Main] Account-0 did-fail-load (non-terminal for metrics): code=${errorCode}`
             );
           }
         );
@@ -249,12 +250,12 @@ export function registerAppReady(options: AppReadyOptions): void {
             isDev: environment.isDev,
           });
         })().catch((error: unknown) => {
-          log.error('[Main] Failed to initialize deferred features:', error);
+          log.error('[Main] Failed to initialize deferred features:', sanitizeLogError(error));
         });
       });
     })
-    .catch((error: unknown) => {
-      log.error('[Main] Failed to initialize application:', error);
+    .catch(() => {
+      log.error('[Main] Failed to initialize application');
       app.quit();
     });
 }

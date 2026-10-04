@@ -10,6 +10,7 @@
 
 import type { BrowserWindow, WebContents } from 'electron';
 import log from 'electron-log';
+import { sanitizeLogError } from '../../../shared/logSanitizer.js';
 import { isAuthenticatedChatUrl } from '../../../shared/urlValidators.js';
 import { getAccountWindowManager } from './accountWindowManager.js';
 import { loadAccountURL } from './accountNavigation.js';
@@ -95,8 +96,8 @@ export function watchBootstrapAccount(accountIndex: AccountIndex): () => void {
   log.info(`[BootstrapPromotion] Watching account-${accountIndex} for authentication`);
 
   // ── Path A: user authenticates inside the same account document ────────────
-  const detachMain = watchForAuth(accountWc, (url) => {
-    log.info(`[BootstrapPromotion] Account-${accountIndex} authenticated in main window: ${url}`);
+  const detachMain = watchForAuth(accountWc, () => {
+    log.info(`[BootstrapPromotion] Account-${accountIndex} authenticated in main window`);
     detachChildCreated();
     if (mgr.isBootstrap(accountIndex)) {
       mgr.promoteBootstrap(accountIndex);
@@ -119,9 +120,7 @@ export function watchBootstrapAccount(accountIndex: AccountIndex): () => void {
     detachChild?.();
 
     detachChild = watchForAuth(childWindow.webContents, (url) => {
-      log.info(
-        `[BootstrapPromotion] Account-${accountIndex} authenticated via child window: ${url}`
-      );
+      log.info(`[BootstrapPromotion] Account-${accountIndex} authenticated via child window`);
       detachMain();
       detachChildCreated();
 
@@ -204,6 +203,6 @@ export function cleanupBootstrapPromotion(): void {
     }
     log.debug('[BootstrapPromotion] Cleanup complete');
   } catch (error: unknown) {
-    log.error('[BootstrapPromotion] Failed to cleanup:', error);
+    log.error('[BootstrapPromotion] Failed to cleanup:', sanitizeLogError(error));
   }
 }

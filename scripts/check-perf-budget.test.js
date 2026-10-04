@@ -339,6 +339,27 @@ describe('evaluateBudgets', () => {
     void failed;
   });
 
+  it.each([
+    [2, 'PASS'],
+    [8, 'WARN'],
+  ])('reports sample-derived IPC p50=%s as %s without gating', (median, status) => {
+    const metrics = makeValidMetrics({
+      ipcLatencySamples: [median + 1, median - 1, median].map((durationMs) => ({
+        timestamp: 100,
+        channel: 'unreadCount',
+        kind: 'fast',
+        durationMs,
+      })),
+    });
+    const { results } = evaluateBudgets(metrics, { silent: true });
+    expect(results.find((result) => result.name === 'ipcLatencyP50')).toMatchObject({
+      actual: median,
+      budget: 5,
+      status,
+      gated: false,
+    });
+  });
+
   it('renamed nativeWindowReady is present and windowFirstPaint is not', () => {
     const names = BUDGETS.map((b) => b.name);
     expect(names).toContain('nativeWindowReady');

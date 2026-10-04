@@ -279,12 +279,6 @@ vi.mock('../platform/windowUtils.js', () => ({
   })),
 }));
 
-vi.mock('../lifecycle/logger.js', () => ({
-  logger: {
-    window: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
-  },
-}));
-
 vi.mock('./accountSessionMaintenance.js', () => ({
   startSessionMaintenance: vi.fn(),
   stopSessionMaintenance: vi.fn(),
@@ -301,6 +295,16 @@ import {
   destroyAccountViewManager,
 } from './accountViewManager.js';
 import { asAccountIndex, asWebContentsId } from '../../../shared/types/branded.js';
+import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  makeSecretError,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 import * as accountHooks from './accountWebContentsHooks.js';
 import { configGet } from '../../config.js';
 import { flushAccountWindowsWrites } from './accountWindowsStore.js';
@@ -1539,5 +1543,157 @@ describe('AccountViewManager permanent removal hooks', () => {
     isolated.destroyAll();
 
     expect(removed).not.toHaveBeenCalled();
+  });
+});
+
+describe('AccountViewManager — log redaction', () => {
+  const spies = spiesOf(log);
+  const PREFIX = '[AccountViewManager]';
+
+  beforeEach(() => {
+    clearSpies(spies);
+  });
+
+  /** Make the NEXT view added to the host throw a secret-bearing Error from its first loadURL. */
+  function failNextInitialLoad(m: AccountViewManager): void {
+    const host = lastWindow();
+    const addChildView = host.contentView.addChildView;
+    const original = addChildView.getMockImplementation();
+    addChildView.mockImplementationOnce((view: MockViewInstance) => {
+      view.webContents.loadURL = vi.fn(() => {
+        throw makeSecretError();
+      });
+      original?.(view);
+    });
+    expect(m.getAccountCount()).toBeGreaterThan(0);
+  }
+
+  it('logs view creation without the URL while the view still loads the original URL', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(0));
+
+    expect(viewOf(m, 0).webContents.loadURL).toHaveBeenCalledExactlyOnceWith(SECRET_AUTH_URL);
+    expect(messagesAt(spies, 'info', PREFIX)).toEqual([
+      '[AccountViewManager] Host window created',
+      '[AccountViewManager] Created view for account 0 (partition=persist:account-0)',
+    ]);
+    expectNoSentinels(spies, 2);
+  });
+
+  it('logs a failed initial load without its Error', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(0));
+    failNextInitialLoad(m);
+    clearSpies(spies);
+
+    expect(() => m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1))).not.toThrow();
+
+    expect(viewOf(m, 1).webContents.loadURL).toHaveBeenCalledExactlyOnceWith(SECRET_AUTH_URL);
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountViewManager] Initial loadURL failed for account 1',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('logs a failed security-handler install without its Error', () => {
+    vi.mocked(installPermissionHandlers).mockImplementationOnce(() => {
+      throw makeSecretError();
+    });
+    const m = new AccountViewManager();
+    expect(() => m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(1))).not.toThrow();
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountViewManager] Failed to install security handlers for account 1',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('reuses an existing view with the original URL and logs a failed reload without its Error', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(0));
+    const wc = viewOf(m, 0).webContents;
+    wc.loadURL.mockClear();
+    wc.loadURL.mockImplementationOnce(() => {
+      throw makeSecretError();
+    });
+
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(0));
+
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(SECRET_AUTH_URL);
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountViewManager] loadURL on existing view failed for account 0',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it('logs a visible-view setBounds failure without its Error', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(0));
+    viewOf(m, 0).setBoundsImpl = () => {
+      throw makeSecretError();
+    };
+    lastWindow().emit('resize');
+
+    expect(messagesAt(spies, 'warn', PREFIX)).toContain(
+      '[AccountViewManager] setBounds(visible) failed for account 0'
+    );
+    expectNoSentinels(spies);
+  });
+
+  it('logs unregister teardown failures without their Errors', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(0));
+    m.createAccountWindow(SECRET_CHAT_URL, asAccountIndex(1));
+    const view = viewOf(m, 1);
+    lastWindow().contentView.removeChildView.mockImplementationOnce(() => {
+      throw makeSecretError();
+    });
+    view.webContents.close = vi.fn(() => {
+      throw makeSecretError();
+    });
+
+    m.unregisterAccount(asAccountIndex(1));
+
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountViewManager] removeChildView failed for account 1',
+      '[AccountViewManager] Closing webContents failed for account 1',
+    ]);
+    expect(messagesAt(spies, 'info', PREFIX)).toContain(
+      '[AccountViewManager] Unregistered account 1'
+    );
+    expectNoSentinels(spies);
+  });
+
+  it('keeps URL-free park, unpark, bootstrap and destroy messages', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(0));
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(1));
+    m.createAccountWindow(SECRET_AUTH_URL, asAccountIndex(2));
+    clearSpies(spies);
+
+    m.dehydrateAccount(asAccountIndex(2));
+    m.hydrateAccount(asAccountIndex(2));
+    m.dehydrateAccount(asAccountIndex(1));
+    m.markAsBootstrap(asAccountIndex(99));
+    m.destroyAll();
+    expect(messagesAt(spies, 'info', '[Window] [AccountViewManager]')).toEqual([
+      '[Window] [AccountViewManager] Destroyed all views and host window',
+      '[Window] [AccountViewManager] Destroyed all views and host window',
+    ]);
+    getAccountViewManager();
+    destroyAccountViewManager();
+
+    expect(messagesAt(spies, 'info', PREFIX)).toEqual([
+      '[AccountViewManager] Dehydrated (parked) account 2; promoted 0',
+      '[AccountViewManager] Hydrated (shown) account 2',
+      '[AccountViewManager] Dehydrated (parked) account 1',
+      '[AccountViewManager] Unregistered account 0',
+      '[AccountViewManager] Unregistered account 1',
+      '[AccountViewManager] Unregistered account 2',
+      '[AccountViewManager] Manager destroyed',
+    ]);
+    expect(messagesAt(spies, 'warn', PREFIX)).toEqual([
+      '[AccountViewManager] markAsBootstrap: account 99 not registered — ignored',
+    ]);
+    expectNoSentinels(spies, 5);
   });
 });

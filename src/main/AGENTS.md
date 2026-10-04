@@ -33,6 +33,7 @@
 - BrowserWindow/webPreferences defaults must remain `contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`.
 - Do not import from `src/preload`; communicate through typed shared contracts and IPC.
 - Never log credentials, OAuth tokens, cookies, or full Google auth URLs; strip or validate first.
+- Logs never carry a URL beyond `scheme://host`, nor free text that may embed one (renderer console text, `did-fail-load` descriptions, Error message/stack/cause). Use `sanitizeLogUrl()` for a URL you must show, `sanitizeLogError()` where a call needs an Error argument (a fresh `[redacted]` Error; the input is never inspected), and otherwise omit the tail and keep the scope, account index, and step. Navigation, validators, and auth-page checks keep receiving the original or validated URL; only the logged text changes. Tests capture the `electron-log` calls (see `tests/mocks/logCapture.ts`), not a log file.
 - Do not add raw timers/listeners in main. Use tracked helpers from `utils/lifecycle/resourceCleanup.ts`.
 - macOS notification **authorization** is `utils/security/notificationAccess.ts` (`ready-to-show` + `{ parentWindow }`). Presentation/labels/focus live in `utils/platform/`. Do not re-document flag semantics here.
 - Keep typed errors and `{ cause }`; use shared `ErrorCode` when crossing module boundaries.

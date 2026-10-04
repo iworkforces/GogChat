@@ -40,6 +40,14 @@ import {
 } from './windowUtils';
 import { logger } from '../lifecycle/logger';
 import {
+  SECRET_AUTH_URL,
+  SECRET_CHAT_URL,
+  clearSpies,
+  expectNoSentinels,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
+import {
   isBenignRendererConsoleMessage,
   isBenignSubframeLoadFailure,
 } from '../ipc/benignLogFilter';
@@ -253,6 +261,9 @@ function createMockHealthWindow() {
         wcHandlers.set(event, handler);
       }),
       getURL: vi.fn().mockReturnValue('https://chat.google.com'),
+      off: vi.fn(),
+      removeListener: vi.fn(),
+      removeAllListeners: vi.fn(),
     },
     _fireWc(event: string, ...args: unknown[]) {
       wcHandlers.get(event)?.(...args);
@@ -373,7 +384,7 @@ describe('windowHealthMonitor', () => {
     win._fireWc('did-navigate', {}, 'https://chat.google.com/u/0', 200);
 
     expect(logger.window.info).toHaveBeenCalledWith(
-      '[Nav] did-navigate: https://chat.google.com/u/0 (HTTP 200)'
+      '[Nav] did-navigate: https://chat.google.com (HTTP 200)'
     );
   });
 
@@ -404,5 +415,152 @@ describe('windowHealthMonitor', () => {
     win._fireWc('responsive');
 
     expect(logger.window.info).toHaveBeenCalledWith('[Renderer] responsive');
+  });
+});
+
+describe('windowHealthMonitor — log redaction', () => {
+  const spies = spiesOf(logger.window);
+  const PROSE = `Refused to load ${SECRET_AUTH_URL} (see ${SECRET_CHAT_URL})`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearSpies(spies);
+  });
+
+  it('attaches the same seven handlers and never detaches any', () => {
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    expect(win.webContents.on.mock.calls.map(([event]) => event)).toEqual([
+      'console-message',
+      'did-fail-load',
+      'did-finish-load',
+      'did-navigate',
+      'render-process-gone',
+      'unresponsive',
+      'responsive',
+    ]);
+    expect(win.webContents.off).not.toHaveBeenCalled();
+    expect(win.webContents.removeListener).not.toHaveBeenCalled();
+    expect(win.webContents.removeAllListeners).not.toHaveBeenCalled();
+  });
+
+  it('logs suppressed renderer console text without it, filtering on the original input', () => {
+    vi.mocked(isBenignRendererConsoleMessage).mockReturnValue(true);
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('console-message', {
+      message: PROSE,
+      sourceId: SECRET_AUTH_URL,
+      lineNumber: 7,
+      level: 2,
+    });
+
+    expect(isBenignRendererConsoleMessage).toHaveBeenCalledExactlyOnceWith(PROSE, SECRET_AUTH_URL);
+    expect(messagesAt(spies, 'debug')).toEqual(['[Renderer:suppressed] [redacted]']);
+    expect(spies.info).not.toHaveBeenCalled();
+    expectNoSentinels(spies);
+  });
+
+  it('logs normal renderer console text without it, keeping the level', () => {
+    vi.mocked(isBenignRendererConsoleMessage).mockReturnValue(false);
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('console-message', {
+      message: PROSE,
+      sourceId: SECRET_AUTH_URL,
+      lineNumber: 7,
+      level: 2,
+    });
+
+    expect(isBenignRendererConsoleMessage).toHaveBeenCalledExactlyOnceWith(PROSE, SECRET_AUTH_URL);
+    expect(messagesAt(spies, 'info')).toEqual(['[Renderer:2] [redacted]']);
+    expectNoSentinels(spies);
+  });
+
+  it('logs a suppressed subframe failure with host only, filtering on the original URL', () => {
+    vi.mocked(isBenignSubframeLoadFailure).mockReturnValue(true);
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('did-fail-load', {}, -27, PROSE, SECRET_AUTH_URL, false);
+
+    expect(isBenignSubframeLoadFailure).toHaveBeenCalledExactlyOnceWith(
+      -27,
+      SECRET_AUTH_URL,
+      false
+    );
+    expect(messagesAt(spies, 'debug')).toEqual([
+      '[Load] Suppressed expected subframe failure (-27) - https://accounts.google.com',
+    ]);
+    expect(spies.error).not.toHaveBeenCalled();
+    expectNoSentinels(spies);
+  });
+
+  it.each([
+    [true, '(main frame)'],
+    [false, '(subframe)'],
+  ])('logs a failed load (isMainFrame=%s) with host only', (isMainFrame, label) => {
+    vi.mocked(isBenignSubframeLoadFailure).mockReturnValue(false);
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('did-fail-load', {}, -102, PROSE, SECRET_AUTH_URL, isMainFrame);
+
+    expect(messagesAt(spies, 'error')).toEqual([
+      `[Load] FAILED ${label} (-102) — https://accounts.google.com`,
+    ]);
+    expect(spies.debug).not.toHaveBeenCalled();
+    expectNoSentinels(spies);
+  });
+
+  it('fails closed for an unparseable failed-load URL', () => {
+    vi.mocked(isBenignSubframeLoadFailure).mockReturnValue(false);
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('did-fail-load', {}, -2, PROSE, 'not a url P2_PATH?P2_QUERY', true);
+
+    expect(messagesAt(spies, 'error')).toEqual(['[Load] FAILED (main frame) (-2) — [redacted]']);
+    expectNoSentinels(spies);
+  });
+
+  it('logs did-finish-load with the origin only', () => {
+    const win = createMockHealthWindow();
+    win.webContents.getURL.mockReturnValue(SECRET_CHAT_URL);
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('did-finish-load');
+
+    expect(messagesAt(spies, 'info')).toEqual(['[Load] did-finish-load: https://chat.google.com']);
+    expectNoSentinels(spies);
+  });
+
+  it('logs did-navigate with the origin only and the HTTP code', () => {
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc('did-navigate', {}, SECRET_AUTH_URL, 302);
+
+    expect(messagesAt(spies, 'info')).toEqual([
+      '[Nav] did-navigate: https://accounts.google.com (HTTP 302)',
+    ]);
+    expectNoSentinels(spies);
+  });
+
+  it.each([
+    ['render-process-gone', [{}, { reason: 'crashed', exitCode: 1 }], 'error'],
+    ['unresponsive', [], 'warn'],
+    ['responsive', [], 'info'],
+  ] as const)('keeps the URL-free %s message', (event, args, level) => {
+    const win = createMockHealthWindow();
+    attachHealthMonitoring(win as never);
+
+    win._fireWc(event, ...args);
+
+    expect(spies[level]).toHaveBeenCalledTimes(1);
+    expectNoSentinels(spies);
   });
 });

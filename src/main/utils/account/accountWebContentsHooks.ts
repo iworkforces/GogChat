@@ -43,8 +43,8 @@ export function onAccountWebContentsCreated(listener: AccountWcListener): () => 
           backend: info.backend,
         });
       }
-    } catch (error: unknown) {
-      log.warn('[AccountWebContentsHooks] Backfill failed:', error);
+    } catch {
+      log.warn('[AccountWebContentsHooks] Backfill failed');
     }
   }
   return () => {
@@ -93,8 +93,8 @@ function invokeListener(
       }
       byAccount.set(info.accountIndex, disposer);
     }
-  } catch (error: unknown) {
-    log.error('[AccountWebContentsHooks] Listener failed:', error);
+  } catch {
+    log.error('[AccountWebContentsHooks] Listener failed');
   }
 }
 
@@ -140,8 +140,8 @@ export function notifyAccountRemoved(accountIndex: AccountIndex): void {
   for (const listener of removalListeners) {
     try {
       listener(accountIndex);
-    } catch (error: unknown) {
-      log.error('[AccountWebContentsHooks] Removal listener failed:', error);
+    } catch {
+      log.error('[AccountWebContentsHooks] Removal listener failed');
     }
   }
 }

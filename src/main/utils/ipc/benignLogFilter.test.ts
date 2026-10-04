@@ -7,6 +7,14 @@ vi.mock('electron-log', () => ({
   default: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+import log from 'electron-log';
+import {
+  SECRET_AUTH_URL,
+  clearSpies,
+  expectNoSentinels,
+  messagesAt,
+  spiesOf,
+} from '../../../../tests/mocks/logCapture';
 import {
   isBenignRendererConsoleMessage,
   isBenignSubframeLoadFailure,
@@ -186,6 +194,21 @@ describe('benignLogFilter', () => {
       warningListeners[0]!(warning);
 
       expect(stderrSpy).not.toHaveBeenCalled();
+    });
+
+    it('logs a suppressed benign warning without the URL it carries', () => {
+      const spies = spiesOf(log);
+      clearSpies(spies);
+      installBenignWarningFilter();
+
+      const warning = new Error(
+        `Failed to load URL: ${SECRET_AUTH_URL} with error: ERR_BLOCKED_BY_RESPONSE\n    at P2_PATH`
+      );
+      warning.name = 'Warning';
+      warningListeners[0]!(warning);
+
+      expect(messagesAt(spies, 'debug')).toEqual(['[Load] Suppressed Electron process warning']);
+      expectNoSentinels(spies);
     });
 
     it('re-prints non-benign warnings to stderr', () => {

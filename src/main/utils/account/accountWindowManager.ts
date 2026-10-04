@@ -326,8 +326,8 @@ export class AccountWindowManager implements IAccountWindowManager {
     if (!window || window.isDestroyed()) {
       try {
         window = this.hydrateAccount(accountIndex);
-      } catch (error: unknown) {
-        log.warn(`[AccountWindowManager] focusAccount hydrate failed for ${accountIndex}:`, error);
+      } catch {
+        log.warn(`[AccountWindowManager] focusAccount hydrate failed for ${accountIndex}`);
         return;
       }
     }
@@ -597,7 +597,7 @@ export class AccountWindowManager implements IAccountWindowManager {
     // hydrate will re-notify create for the new WebContents.
     this.emitWebContentsDestroyed(accountIndex);
     this.registry.unregisterAccount(accountIndex);
-    log.info(`[AccountWindowManager] Dehydrating account ${accountIndex} (url=${snapshot.url})`);
+    log.info(`[AccountWindowManager] Dehydrating account ${accountIndex}`);
     window.destroy();
   }
 
@@ -653,9 +653,7 @@ export class AccountWindowManager implements IAccountWindowManager {
       this.dehydratedAccounts.set(accountIndex, snapshot);
       throw error;
     }
-    log.info(
-      `[AccountWindowManager] Hydrated account ${accountIndex} (partition=${partition}, url=${snapshot.url})`
-    );
+    log.info(`[AccountWindowManager] Hydrated account ${accountIndex} (partition=${partition})`);
     return window;
   }
 

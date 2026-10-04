@@ -58,6 +58,9 @@ import {
   hasFinalizedPerformanceExport,
 } from './performanceFinalizer.js';
 import { destroyPerformanceMonitor, getPerformanceMonitor } from './performanceMonitor.js';
+import { IPC_CHANNELS } from '../../../shared/constants.js';
+import { asType } from '../../../shared/typeUtils.js';
+import type { PerformanceMetrics } from './performanceTypes.js';
 
 describe('performanceFinalizer', () => {
   beforeEach(() => {
@@ -131,6 +134,28 @@ describe('performanceFinalizer', () => {
     expect(written.capture.complete).toBe(false);
     expect(written.capture.valid).toBe(false);
     expect(written.capture.reason).toMatch(/network error/);
+  });
+
+  it('includes recorded IPC handler samples in the final one-shot JSON', () => {
+    armPerformanceFinalizer({ outputPath: '/fake/path/userData/performance-metrics.json' });
+    markAllRequired();
+    getPerformanceMonitor().recordIpcLatency(IPC_CHANNELS.UNREAD_COUNT, 2.5, {
+      kind: 'fast',
+      accountIndex: 0,
+    });
+    notifyDeferredPhaseComplete();
+    notifyDocumentLoadComplete();
+    const written = asType<PerformanceMetrics>(
+      JSON.parse(asType<string>(writeFileSyncMock.mock.calls[0]?.[1]))
+    );
+    expect(written.ipcLatencySamples).toEqual([
+      expect.objectContaining({
+        channel: IPC_CHANNELS.UNREAD_COUNT,
+        durationMs: 2.5,
+        kind: 'fast',
+        accountIndex: 0,
+      }),
+    ]);
   });
 
   it('schedules one renderer re-sample when ready but no Tab metrics yet', () => {

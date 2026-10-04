@@ -13,6 +13,7 @@ import type { IPCChannelName } from '../../../shared/constants.js';
 import { getRateLimiter } from './rateLimiter.js';
 import { logger } from '../lifecycle/logger.js';
 import { toErrorMessage } from '../lifecycle/errorUtils.js';
+import { startIPCHandlerSpan } from './defineIPC.js';
 
 export interface FastHandlerConfig<T> {
   channel: IPCChannelName;
@@ -46,7 +47,12 @@ export function registerFastHandler<T>(config: FastHandlerConfig<T>): () => void
     }
 
     try {
-      handler(validated, event);
+      const finish = startIPCHandlerSpan({ channel, kind: 'fast', event });
+      try {
+        handler(validated, event);
+      } finally {
+        finish?.();
+      }
     } catch (error: unknown) {
       logger.ipc.error(`Fast-handler ${channel} error:`, error);
     }

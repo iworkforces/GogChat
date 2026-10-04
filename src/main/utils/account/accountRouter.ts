@@ -50,13 +50,11 @@ function applyRequestedUrlAfterHydrate(
   let currentUrl = '';
   try {
     currentUrl = window.webContents.getURL();
-  } catch (error: unknown) {
-    log.warn(`[AccountRouter] getURL failed after hydrate for account ${accountIndex}:`, error);
+  } catch {
+    log.warn(`[AccountRouter] getURL failed after hydrate for account ${accountIndex}`);
   }
   if (_isBootstrap(accountIndex) && isGoogleAuthUrl(currentUrl)) {
-    log.info(
-      `[AccountRouter] Skipping post-hydrate loadURL for account ${accountIndex} — bootstrap window is mid-auth (${currentUrl})`
-    );
+    log.info(`[AccountRouter] Skipping post-hydrate loadURL for account ${accountIndex}: mid-auth`);
     return;
   }
   if (currentUrl === url) {
@@ -116,9 +114,7 @@ export function routeAccountWindow(
     const isBootstrapWindow = _isBootstrap(accountIndex);
     const currentUrl = existingWindow.webContents.getURL();
     if (isBootstrapWindow && isGoogleAuthUrl(currentUrl)) {
-      log.info(
-        `[AccountRouter] Skipping loadURL for account ${accountIndex} — bootstrap window is mid-auth (${currentUrl})`
-      );
+      log.info(`[AccountRouter] Skipping loadURL for account ${accountIndex}: mid-auth`);
       return existingWindow;
     }
     void existingWindow.loadURL(url);

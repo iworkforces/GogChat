@@ -105,20 +105,19 @@ export interface RendererMemorySnapshot {
 }
 
 /**
- * Single IPC round-trip latency sample. Captured opportunistically by
- * instrumented IPC handlers (Wave 0 primitive — recorders are wired in
- * later waves). Backward-compatible: consumers may ignore the field.
+ * IPC handler execution time, excluding validation, rate limiting, dedup joins,
+ * reply transport and renderer round trips. Backward-compatible optional export field.
  */
 export interface IPCLatencySample {
   /** Milliseconds since perf monitor start when the sample was recorded. */
   timestamp: number;
   /** IPC channel name (must be a registered `IPCChannelName` at call sites). */
   channel: string;
-  /** Measured duration in milliseconds (handler entry → response/return). */
+  /** Monotonic milliseconds from handler entry until return or promise settlement. */
   durationMs: number;
-  /** Optional renderer/account context used to slice latency by account. */
+  /** Account index resolved from the account registry, never the sender id. */
   accountIndex?: number;
-  /** Optional discriminator for handler kind (`on` / `reply` / `invoke`). */
+  /** Discriminator for handler kind (`on` / `reply` / `invoke` / `fast`). */
   kind?: 'on' | 'reply' | 'invoke' | 'fast';
 }
 

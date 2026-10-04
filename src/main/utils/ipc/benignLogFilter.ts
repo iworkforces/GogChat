@@ -83,7 +83,7 @@ export function isBenignElectronUrlWarning(message: string): boolean {
 export function installBenignWarningFilter(): void {
   process.on('warning', (warning: Error) => {
     if (isBenignElectronUrlWarning(warning.message)) {
-      log.debug(`[Load] Suppressed Electron process warning: ${warning.message.split('\n')[0]}`);
+      log.debug('[Load] Suppressed Electron process warning');
       return;
     }
     // Non-benign warnings: re-print to stderr since adding a 'warning'

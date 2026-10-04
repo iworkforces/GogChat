@@ -30,6 +30,12 @@ import log from 'electron-log';
 import { openNewGitHubIssue } from '../utils/platform/platformHelpers';
 import { getPackageInfo } from '../utils/platform/packageInfo';
 import unhandled from 'electron-unhandled';
+import {
+  SECRET_AUTH_URL,
+  expectNoSentinels,
+  makeSecretError,
+  spiesOf,
+} from '../../../tests/mocks/logCapture';
 
 describe('reportExceptions', () => {
   beforeEach(() => {
@@ -51,6 +57,31 @@ describe('reportExceptions', () => {
     const callArgs = vi.mocked(unhandled).mock.calls[0][0];
     callArgs.logger('error message', 'detail');
     expect(log.error).toHaveBeenCalledWith('error message', 'detail');
+  });
+
+  it('replaces Error arguments with the fixed placeholder and forwards the rest', () => {
+    reportExceptions();
+    const callArgs = vi.mocked(unhandled).mock.calls[0][0];
+
+    callArgs.logger('Unhandled Rejection', makeSecretError(), { note: 'kept' });
+
+    const [title, logged, extra] = vi.mocked(log.error).mock.calls[0] as [string, Error, unknown];
+    expect(title).toBe('Unhandled Rejection');
+    expect(logged).toBeInstanceOf(Error);
+    expect(logged.message).toBe('[redacted]');
+    expect(logged.stack).toBe('[redacted]');
+    expect(logged.cause).toBeUndefined();
+    expect(extra).toEqual({ note: 'kept' });
+    expectNoSentinels(spiesOf(log));
+  });
+
+  it('keeps a sentinel-free Error out of the log even when its prose embeds a URL', () => {
+    reportExceptions();
+    const callArgs = vi.mocked(unhandled).mock.calls[0][0];
+
+    callArgs.logger(new Error(`Failed to load URL: ${SECRET_AUTH_URL}`));
+
+    expectNoSentinels(spiesOf(log));
   });
 
   it('reportButton function opens GitHub issue', () => {

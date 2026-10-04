@@ -13,6 +13,7 @@ import {
   isBenignRendererConsoleMessage,
   isBenignSubframeLoadFailure,
 } from '../ipc/benignLogFilter.js';
+import { sanitizeLogUrl } from '../../../shared/logSanitizer.js';
 import { asType } from '../../../shared/typeUtils.js';
 
 const windowLogger = logger.window;
@@ -74,39 +75,35 @@ export function attachHealthMonitoring(window: BrowserWindow): void {
 
   webContents.on('console-message', (event: Event<WebContentsConsoleMessageEventParams>) => {
     if (isBenignRendererConsoleMessage(event.message, event.sourceId)) {
-      windowLogger.debug(
-        `[Renderer:suppressed] ${event.message} (${event.sourceId}:${event.lineNumber})`
-      );
+      windowLogger.debug('[Renderer:suppressed] [redacted]');
       return;
     }
 
-    windowLogger.info(
-      `[Renderer:${event.level}] ${event.message} (${event.sourceId}:${event.lineNumber})`
-    );
+    windowLogger.info(`[Renderer:${event.level}] [redacted]`);
   });
 
   webContents.on(
     'did-fail-load',
-    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
       if (isBenignSubframeLoadFailure(errorCode, validatedURL, isMainFrame)) {
         windowLogger.debug(
-          `[Load] Suppressed expected subframe failure: ${errorDescription} (${errorCode}) - ${validatedURL}`
+          `[Load] Suppressed expected subframe failure (${errorCode}) - ${sanitizeLogUrl(validatedURL)}`
         );
         return;
       }
 
       windowLogger.error(
-        `[Load] FAILED ${isMainFrame ? '(main frame)' : '(subframe)'}: ${errorDescription} (${errorCode}) — ${validatedURL}`
+        `[Load] FAILED ${isMainFrame ? '(main frame)' : '(subframe)'} (${errorCode}) — ${sanitizeLogUrl(validatedURL)}`
       );
     }
   );
 
   webContents.on('did-finish-load', () => {
-    windowLogger.info(`[Load] did-finish-load: ${webContents.getURL()}`);
+    windowLogger.info(`[Load] did-finish-load: ${sanitizeLogUrl(webContents.getURL())}`);
   });
 
   webContents.on('did-navigate', (_event, navUrl, httpResponseCode) => {
-    windowLogger.info(`[Nav] did-navigate: ${navUrl} (HTTP ${httpResponseCode})`);
+    windowLogger.info(`[Nav] did-navigate: ${sanitizeLogUrl(navUrl)} (HTTP ${httpResponseCode})`);
   });
 
   webContents.on('render-process-gone', (_event, details) => {

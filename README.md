@@ -52,7 +52,7 @@ GogChat is an unofficial macOS desktop wrapper for Google Chat, built with Elect
 
 ## Architecture
 
-GogChat is not structured like a default Electron starter app. There is no `src/renderer`: the UI is remote Google Chat plus `src/offline/` and sandboxed About/Update `data:` dialogs. The app uses a dual-build pipeline and declarative feature lifecycle.
+GogChat is not structured like a default Electron starter app. There is no `src/renderer`: the UI is remote Google Chat plus `src/offline/` and sandboxed About/Update `data:` dialogs. The app uses separate main, preload, and offline build passes and a declarative feature lifecycle.
 
 ```text
 src/
@@ -63,7 +63,7 @@ src/
 │   └── utils/         # Window/session/config/IPC/performance utilities
 ├── preload/           # Sandbox-compatible CommonJS preload → window.gogchat
 ├── shared/            # Cross-process constants, validators, and types
-└── offline/           # Offline fallback assets copied into lib/offline
+└── offline/           # Classic retry script + HTML/CSS/logo shipped in lib/offline
 ```
 
 ### Feature lifecycle
@@ -81,10 +81,11 @@ New features should be added as feature modules under `src/main/features/` and d
 
 ### Build system
 
-`scripts/build-rsbuild.js` runs two Rsbuild passes:
+`scripts/build-rsbuild.js` runs three Rsbuild passes:
 
 1. **Main process:** ESM, `electron-main` target, single entry at `src/main/index.ts` → `lib/main/index.js`.
 2. **Preload scripts:** CommonJS, `electron-renderer` target, one entry per `src/preload/*.ts` file.
+3. **Offline retry:** Self-contained classic browser script, `web` target, `src/offline/index.ts` → `lib/offline/index.js`, without chunk loading or typecheck emit. HTML, CSS, and the SVG logo ship alongside it with sibling-relative references; the non-watch build verifies all local page references stay inside shipped `lib/`.
 
 The preload build must remain CommonJS because Electron sandboxed preload scripts cannot load ESM. The preload pass also keeps `cleanDistPath: false` so it does not wipe the main-process output.
 

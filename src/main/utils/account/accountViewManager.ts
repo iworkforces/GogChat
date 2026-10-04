@@ -253,10 +253,9 @@ export class AccountViewManager implements IAccountWindowManager {
       if (entry.resourceState === 'visible') {
         try {
           entry.view.setBounds(fullBounds);
-        } catch (error: unknown) {
+        } catch {
           log.warn(
-            `[AccountViewManager] setBounds(visible) failed for account ${entry.accountIndex}:`,
-            error
+            `[AccountViewManager] setBounds(visible) failed for account ${entry.accountIndex}`
           );
         }
       } else {
@@ -296,10 +295,9 @@ export class AccountViewManager implements IAccountWindowManager {
       try {
         void existing.view.webContents.loadURL(url);
         existing.currentUrl = url;
-      } catch (error: unknown) {
+      } catch {
         log.warn(
-          `[AccountViewManager] loadURL on existing view failed for account ${accountIndex}:`,
-          error
+          `[AccountViewManager] loadURL on existing view failed for account ${accountIndex}`
         );
       }
       return host;
@@ -329,10 +327,9 @@ export class AccountViewManager implements IAccountWindowManager {
         );
         installPermissionHandlers(sessionCarrier);
         installHeaderFix(sessionCarrier);
-      } catch (error: unknown) {
+      } catch {
         log.warn(
-          `[AccountViewManager] Failed to install security handlers for account ${accountIndex}:`,
-          error
+          `[AccountViewManager] Failed to install security handlers for account ${accountIndex}`
         );
       }
     }
@@ -354,8 +351,8 @@ export class AccountViewManager implements IAccountWindowManager {
 
     try {
       void view.webContents.loadURL(url);
-    } catch (error: unknown) {
-      log.warn(`[AccountViewManager] Initial loadURL failed for account ${accountIndex}:`, error);
+    } catch {
+      log.warn(`[AccountViewManager] Initial loadURL failed for account ${accountIndex}`);
     }
 
     log.info(
@@ -553,8 +550,8 @@ export class AccountViewManager implements IAccountWindowManager {
     if (this.hostWindow && !this.hostWindow.isDestroyed()) {
       try {
         this.hostWindow.contentView.removeChildView(entry.view);
-      } catch (error: unknown) {
-        log.warn(`[AccountViewManager] removeChildView failed for account ${accountIndex}:`, error);
+      } catch {
+        log.warn(`[AccountViewManager] removeChildView failed for account ${accountIndex}`);
       }
     }
     try {
@@ -564,11 +561,8 @@ export class AccountViewManager implements IAccountWindowManager {
       if (!wc.isDestroyed()) {
         wc.close();
       }
-    } catch (error: unknown) {
-      log.warn(
-        `[AccountViewManager] Closing webContents failed for account ${accountIndex}:`,
-        error
-      );
+    } catch {
+      log.warn(`[AccountViewManager] Closing webContents failed for account ${accountIndex}`);
     }
     if (this.views.size === 0) {
       this.mostRecentAccountIndex = null;
