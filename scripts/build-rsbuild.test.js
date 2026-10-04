@@ -2,9 +2,66 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { collectEmittedChunks, trackBuildHistory } from './build-rsbuild.js';
+
+describe('watch build orchestration', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.doUnmock('@rsbuild/core');
+    vi.doUnmock('./featurePlanPlugin.js');
+    vi.resetModules();
+  });
+
+  it.each(['SIGINT', 'SIGTERM'])('closes all three builds on %s', async (signal) => {
+    const configs = [];
+    const instances = Array.from({ length: 3 }, () => {
+      const close = vi.fn().mockResolvedValue(undefined);
+      return { build: vi.fn().mockResolvedValue({ close }), close };
+    });
+    vi.doMock('@rsbuild/core', () => ({
+      loadConfig: vi.fn().mockResolvedValue({ content: { output: { cleanDistPath: true } } }),
+      createRsbuild: vi.fn(async ({ rsbuildConfig }) => {
+        configs.push(rsbuildConfig);
+        return instances[configs.length - 1];
+      }),
+    }));
+    vi.doMock('./featurePlanPlugin.js', () => ({ generateFeaturePlan: vi.fn() }));
+    const handlers = new Map();
+    vi.spyOn(process, 'on').mockImplementation((name, handler) => {
+      handlers.set(name, handler);
+      return process;
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined);
+    vi.spyOn(fs, 'copyFileSync').mockImplementation(() => undefined);
+    const argv = process.argv;
+    process.argv = [...argv, '--watch'];
+    try {
+      vi.resetModules();
+      const { build } = await import('./build-rsbuild.js');
+      await build();
+      expect(configs).toHaveLength(3);
+      expect(configs[0].output.cleanDistPath).toBe(true);
+      expect(configs[1].output).toMatchObject({ cleanDistPath: false, module: false });
+      expect(configs[2].output).toMatchObject({
+        target: 'web',
+        cleanDistPath: false,
+        module: false,
+      });
+      for (const instance of instances)
+        expect(instance.build).toHaveBeenCalledWith({ watch: true });
+      expect(instances[0].build.mock.invocationCallOrder[0]).toBeLessThan(
+        instances[2].build.mock.invocationCallOrder[0]
+      );
+      await handlers.get(signal)();
+      for (const instance of instances) expect(instance.close).toHaveBeenCalledOnce();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      process.argv = argv;
+    }
+  });
+});
 
 describe('collectEmittedChunks', () => {
   let tmpRoot;

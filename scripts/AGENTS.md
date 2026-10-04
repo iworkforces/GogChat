@@ -8,7 +8,7 @@ Scripts drive the dual Rsbuild pipeline, feature-plan generation, packaging, not
 
 ### Build and feature plan
 
-- `build-rsbuild.js` - builds ESM main and CJS preload, copies offline assets, preserves preload `cleanDistPath: false`, records `buildTimeMs` and `lib/chunks/*.js` counts in `.build-history.json`. With `ANALYZE=true`, writes machine-readable stats under the evidence root.
+- `build-rsbuild.js` - builds ESM main, CJS preload, then a separate classic web offline script; copies offline HTML/CSS/logo and verifies local references. Preserves preload `cleanDistPath: false`, records `buildTimeMs` and `lib/chunks/*.js` counts in `.build-history.json`. With `ANALYZE=true`, writes machine-readable stats under the evidence root.
 - `featurePlanPlugin.js` / `featureSpecParser.js` - parse initializer specs with the installed TypeScript 6.x compiler API (`createSourceFile`; typecheck still uses `@typescript/native` / TS 7), unwrap `as const satisfies` / parens, fail closed on unsupported array elements, topologically batch dependencies, reject forward-phase deps (`security < critical < ui < deferred`), and write `src/main/generated/featurePlan.ts` only after the full source is built. Unsupported expressions are rejected with file, element index, and property.
 - `install-electron-binary.js` - repo-controlled Electron zip extract for macOS CI (ditto); respects `npm_config_arch` and Rosetta detection. Pin target arch when packaging non-host arches.
 
@@ -28,6 +28,7 @@ Scripts drive the dual Rsbuild pipeline, feature-plan generation, packaging, not
 - `verify-macos-package-artifacts.js` — DMG basenames, required arm64/x64, no `amd64`/`ia32`/`universal`. After those checks pass, writes or validates one sidecar per accepted DMG when `--source-sha` and `--package-version` are both set.
 - `verify-packaged-dependency-closure.js` — runtime externals vs packaged fixture; classify `@rspack`/`@ast-grep`/`@rslib`. Run **before** removing payload.
 - `verify-packaged-preload.js` — packaged-presence only (`lib/preload/index.js` + relative CJS chunks). Does not prove execution (built-CJS fixture).
+- `verify-packaged-offline.js` — resolves every local page `src`/`href` against shipped `lib/`, rejecting missing files and archive-boundary escapes. Runs at the non-watch build tail; accepts an app root as a CLI argument. Built-app integration separately proves classic script execution.
 - `app-identity.cjs` — `APP_ID` / `NOTARIZE_BUNDLE_ID` = `com.ocworkforces.gogchat`. Lockstep with `src/shared/appIdentity.ts` and `electron-builder.yml`. `notarize.cjs` uses this id only. `notarize-identity.test.js` forbids productFilename-derived / typo ids.
 - `after-pack.cjs` — strip/locale for darwin **arm64 and x64** (not universal). `remove-locales.js` is standalone (prefer after-pack).
 - `verify-windows-package-artifacts.js` / `verify-windows-signing-policy.js` — guarded NSIS names + `WIN_CSC_*` pair or unsigned waiver; same post-check sidecar write/validate as macOS.
@@ -43,7 +44,7 @@ Scripts drive the dual Rsbuild pipeline, feature-plan generation, packaging, not
 
 - Do not convert the preload build to ESM.
 - Do not remove `cleanDistPath: false`; otherwise one Rsbuild pass can delete the other output.
-- Do not modify offline asset output paths unless `src/offline/AGENTS.md` contracts are updated too.
+- Offline output is `lib/offline/{index.html,index.css,index.js,scalable.svg}` with sibling-relative references. Its fresh web config keeps `cleanDistPath: false`, disables HTML generation and chunk splitting, and must not inherit Electron config. Main cleans first; all three watch instances close on SIGINT/SIGTERM. Do not modify paths unless `src/offline/AGENTS.md` and the asset verifier are updated too.
 - Do not replace the feature-plan plugin with runtime registration or hand-edit `generated/featurePlan.ts`.
 - Count emitted async chunks as `lib/chunks/*.js` (not the stale `*.chunk.js` suffix).
 - Pass real wall-clock `buildTimeMs` into build history; do not leave it absent in production builds.

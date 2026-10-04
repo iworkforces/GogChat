@@ -38,7 +38,7 @@ Icon cache loads paths relative to `resources/`:
 
 ## Packaging
 
-`electron-builder.yml` copies `resources/` as `extraResources` outside the ASAR archive. Both macOS packaging arches (`arm64` and `x64` separate DMGs) use the same `resources/icons/normal/mac.icns`. Guarded Windows release-engineering preparation references `resources/icons/normal/win.ico`. That Windows icon path is not a public support claim. The offline fallback page references `resources/icons/normal/scalable.svg`. Builder also excludes proven build-only tool packages; runtime icons must remain in `extraResources` regardless of dependency pruning.
+`electron-builder.yml` copies `resources/` as `extraResources` outside the ASAR archive. Both macOS packaging arches (`arm64` and `x64` separate DMGs) use the same `resources/icons/normal/mac.icns`. Guarded Windows release-engineering preparation references `resources/icons/normal/win.ico`. That Windows icon path is not a public support claim. The build copies `resources/icons/normal/scalable.svg` to `lib/offline/scalable.svg`; the offline page references that sibling inside the ASAR archive. Builder also excludes proven build-only tool packages; runtime icons must remain in `extraResources` regardless of dependency pruning.
 
 Windows packaging, when used in CI preparation, emits separate NSIS setup files for x64 and arm64. Keep icon generation cross-platform, but do not add Windows support wording to resource docs until clean packaged smoke evidence exists on Windows x64 and real Windows arm64.
 
@@ -46,5 +46,5 @@ Windows packaging, when used in CI preparation, emits separate NSIS setup files 
 
 - No ad-hoc rename or hand-edit of generated icon files.
 - No moving icons into startup paths without updating `iconCache.ts` warmup tiers and tests.
-- No changing output paths without updating `electron-builder.yml` extraResources, `src/offline/index.html` SVG reference, and `scripts/AGENTS.md` build invariants.
+- No changing resource output paths without updating `electron-builder.yml` extraResources and build invariants. Offline logo changes must also update `copyOfflineAssets`, its sibling HTML reference, and the packaged-offline verifier.
 - No arch-specific icon trees for macOS arm64 vs x64; one `mac.icns` serves both DMGs.

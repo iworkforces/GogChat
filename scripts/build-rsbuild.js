@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { generateFeaturePlan } from './featurePlanPlugin.js';
+import { verifyPackagedOffline } from './verify-packaged-offline.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -156,6 +157,10 @@ function copyOfflineAssets() {
   }
 
   console.log('[Build] Copied offline HTML assets');
+  fs.copyFileSync(
+    path.join(__dirname, '../resources/icons/normal/scalable.svg'),
+    path.join(offlineDistDir, 'scalable.svg')
+  );
 }
 
 /**
@@ -314,7 +319,7 @@ export function trackBuildHistory(libDir, options = {}) {
 /**
  * Main build function
  */
-async function build() {
+export async function build() {
   try {
     const startTime = Date.now();
     // Codegen: emit src/main/generated/featurePlan.ts from .spec.ts files
@@ -379,11 +384,38 @@ async function build() {
       },
     };
     const preloadRsbuild = await createRsbuild({ rsbuildConfig: preloadRsbuildConfig });
+    const offlineRsbuild = await createRsbuild({
+      rsbuildConfig: {
+        source: { entry: { index: path.join(__dirname, '../src/offline/index.ts') } },
+        output: {
+          target: 'web',
+          distPath: { root: 'lib', js: 'offline', jsAsync: 'offline' },
+          filename: { js: '[name].js' },
+          filenameHash: false,
+          module: false,
+          polyfill: 'off',
+          sourceMap: false,
+          cleanDistPath: false,
+          minify: !isDev,
+        },
+        tools: {
+          htmlPlugin: false,
+          rspack: {
+            target: 'web',
+            devtool: false,
+            optimization: { splitChunks: false, runtimeChunk: false },
+            output: { iife: true, asyncChunks: false, chunkFormat: 'array-push' },
+            experiments: { outputModule: false },
+          },
+        },
+      },
+    });
     if (isWatch) {
       console.log('[Build] Starting watch mode...');
-      copyOfflineAssets();
       const mainResult = await mainRsbuild.build({ watch: true });
       const preloadResult = await preloadRsbuild.build({ watch: true });
+      const offlineResult = await offlineRsbuild.build({ watch: true });
+      copyOfflineAssets();
       console.log('[Build] ✅ Watching for changes... (press Ctrl+C to stop)');
 
       // Graceful shutdown on SIGINT/SIGTERM
@@ -391,6 +423,7 @@ async function build() {
         console.log('\n[Build] Stopping watch mode...');
         await mainResult.close();
         await preloadResult.close();
+        await offlineResult.close();
         process.exit(0);
       };
       process.on('SIGINT', cleanup);
@@ -398,7 +431,12 @@ async function build() {
     } else {
       await mainRsbuild.build();
       await preloadRsbuild.build();
+      await offlineRsbuild.build();
       copyOfflineAssets();
+      const offlineClosure = verifyPackagedOffline(path.join(__dirname, '..'));
+      if (!offlineClosure.ok) {
+        throw new Error(`Offline asset closure failed: ${offlineClosure.missing.join(', ')}`);
+      }
       const endTime = Date.now();
       const buildTimeMs = endTime - startTime;
       const duration = (buildTimeMs / 1000).toFixed(2);

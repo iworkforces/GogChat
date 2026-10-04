@@ -11,7 +11,7 @@
 - Preload answers false online checks with `app:onlineCheckFailed`; this page re-enables the retry control without reloading the document.
 - Keep the script self-contained/IIFE-friendly.
 - `setInterval` is intentionally untracked here because this is not main-process code.
-- `MAX_AUTO_ATTEMPT_COUNT` (100) caps automatic retries on a 60s `setInterval`; do not add infinite retry loops. The script is an IIFE and must not import `src/shared`.
+- `MAX_AUTO_ATTEMPT_COUNT` (100) caps automatic retries on a 60s `window.setInterval`, cleared on the 100th dispatch. Manual clicks never consume that budget and still work after exhaustion. The script must not import `src/shared`.
 
 ## Recovery UX contract
 
@@ -22,8 +22,10 @@
 
 ## Build contract
 
-- `copyOfflineAssets` in `scripts/build-rsbuild.js` copies `index.html` + `index.css` only to `lib/offline`. `src/offline/index.ts` is **not** a current Rsbuild entry, so the retry IIFE may not ship until that file is added as an entry.
-- `src/offline/index.html` still references `../../lib/offline/index.js`. That path is the tree's intended script hook; do not invent a build-entry or copy-step fix here — document the contract vs tree only.
+- A separate web-target Rsbuild pass compiles `src/offline/index.ts` to a self-contained classic `lib/offline/index.js`, after the main pass cleans `lib/`. It has no imports, chunk loader, Node/Electron globals, or dependency on typecheck emit.
+- `copyOfflineAssets` ships `index.html`, `index.css`, and `resources/icons/normal/scalable.svg` together in `lib/offline`. HTML references these siblings and `index.js`; nothing reaches outside `lib/` into `extraResources`.
+- Non-watch builds run `scripts/verify-packaged-offline.js` after copying assets and fail on dangling or outside-lib local `src`/`href` references. The verifier is also a standalone CLI accepting the app root.
+- Keep the existing CSP unchanged. Built-app Playwright coverage loads the real `file:` page with both account backends and exercises retry through built preload and main connectivity.
 - Do not change output paths without updating `scripts/build-rsbuild.js` and packaging checks. Copied assets ship the same way in both macOS packaging arches.
 
 ## Anti-patterns
