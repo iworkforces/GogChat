@@ -29,10 +29,6 @@ vi.mock('electron', () => ({
   },
 }));
 
-vi.mock('electron-update-notifier', () => ({
-  checkForUpdates: vi.fn(),
-}));
-
 vi.mock('electron-log', () => ({
   default: { log: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));

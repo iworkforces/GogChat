@@ -16,15 +16,19 @@ import {
   launchElectronAppWithWindow,
   type LaunchedElectronApp,
 } from '../helpers/electron-test';
+import {
+  GITHUB_UPDATE_STABLE_URL,
+  githubUpdateFixture,
+  type GithubUpdateFixtureKind,
+} from '../helpers/githubReleaseFixtures';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
 const APP_PATH = path.join(PROJECT_ROOT, 'lib/main/index.js');
 const FEATURE_CHUNK = path.join(PROJECT_ROOT, 'lib/chunks/appUpdates.js');
 
-const STABLE_URL = 'https://github.com/iworkforces/GogChat/releases/tag/v99.0.0';
+const STABLE_URL = GITHUB_UPDATE_STABLE_URL;
 
-type FixtureKind =
-  'stable' | 'draft-only' | 'prerelease-only' | 'malformed' | 'empty' | 'http-error' | 'timeout';
+type FixtureKind = GithubUpdateFixtureKind;
 
 type UpdateWindowSnapshot = {
   title: string;
@@ -77,73 +81,6 @@ async function probeManualUpdate(
       const openedUrls: string[] = [];
       let fetchHadAbortSignal = false;
 
-      const fixtureFor = (
-        fixtureKind: typeof args.kind
-      ): { ok: boolean; status: number; body: unknown } => {
-        if (fixtureKind === 'malformed') {
-          return { ok: true, status: 200, body: { not: 'an-array' } };
-        }
-        if (fixtureKind === 'empty') {
-          return { ok: true, status: 200, body: [] };
-        }
-        if (fixtureKind === 'http-error') {
-          return { ok: false, status: 503, body: null };
-        }
-        if (fixtureKind === 'draft-only') {
-          return {
-            ok: true,
-            status: 200,
-            body: [
-              {
-                tag_name: 'v99.0.0',
-                html_url: args.stableUrl,
-                draft: true,
-                prerelease: false,
-              },
-            ],
-          };
-        }
-        if (fixtureKind === 'prerelease-only') {
-          return {
-            ok: true,
-            status: 200,
-            body: [
-              {
-                tag_name: 'v99.0.0',
-                html_url: args.stableUrl,
-                draft: false,
-                prerelease: true,
-              },
-            ],
-          };
-        }
-        return {
-          ok: true,
-          status: 200,
-          body: [
-            {
-              tag_name: 'v98.0.0-draft',
-              html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v98.0.0-draft',
-              draft: true,
-              prerelease: false,
-            },
-            {
-              tag_name: 'v98.0.0-rc.1',
-              html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v98.0.0-rc.1',
-              draft: false,
-              prerelease: true,
-            },
-            {
-              tag_name: 'v99.0.0',
-              html_url: args.stableUrl,
-              body: 'Local fixture notes',
-              draft: false,
-              prerelease: false,
-            },
-          ],
-        };
-      };
-
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         fetchUrls.push(url);
@@ -165,7 +102,7 @@ async function probeManualUpdate(
             signal.addEventListener('abort', fail, { once: true });
           });
         }
-        const fixture = fixtureFor(args.kind);
+        const fixture = args.fixture;
         return {
           ok: fixture.ok,
           status: fixture.status,
@@ -326,6 +263,7 @@ async function probeManualUpdate(
     {
       kind,
       stableUrl: STABLE_URL,
+      fixture: githubUpdateFixture(kind, STABLE_URL),
       featureChunk: FEATURE_CHUNK,
       appPath: APP_PATH,
       projectRoot: PROJECT_ROOT,
@@ -399,6 +337,18 @@ test.describe('manual update liveness', () => {
           result.snapshots.some((snap) => snap.phase === 'result'),
           `${kind} settles a result phase`
         ).toBe(true);
+        if (kind === 'http-error') {
+          expect(
+            result.snapshots.some((snap) => snap.message === 'New release available'),
+            kind
+          ).toBe(false);
+          expect(
+            result.snapshots.some(
+              (snap) => snap.message?.includes('Couldn’t') || snap.message?.includes("Couldn't")
+            ),
+            kind
+          ).toBe(true);
+        }
       }
 
       const timedOut = await probeManualUpdate(app, 'timeout');
@@ -407,9 +357,13 @@ test.describe('manual update liveness', () => {
       expect(
         timedOut.snapshots.some(
           (snap) =>
-            snap.phase === 'result' && (snap.kind === 'error' || snap.message?.includes('Couldn’t'))
+            snap.phase === 'result' &&
+            (snap.message?.includes('Couldn’t') || snap.message?.includes("Couldn't"))
         )
       ).toBe(true);
+      expect(timedOut.snapshots.some((snap) => snap.message === 'New release available')).toBe(
+        false
+      );
 
       const again = await probeManualUpdate(app, 'stable');
       expect(
