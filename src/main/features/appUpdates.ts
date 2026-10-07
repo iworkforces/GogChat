@@ -85,7 +85,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * `https://github.com/<repo>/releases/tag/<tag>` only.
- * Rejects userinfo, query, hash, other repos, and `/releases/download` or `/latest`.
+ * One tag segment, equal to `tagName` or its encodeURIComponent form.
+ * Rejects userinfo, query, hash, other repos, `/releases/download`, `/latest`,
+ * and any tag that decodes into `/`, `\`, `.`, or `..`.
  * `www.github.com` is stored as `github.com`.
  */
 function canonicalGithubReleaseTagUrl(
@@ -94,6 +96,15 @@ function canonicalGithubReleaseTagUrl(
   tagName: string
 ): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2048) {
+    return null;
+  }
+  if (
+    tagName.length === 0 ||
+    tagName === '.' ||
+    tagName === '..' ||
+    tagName.includes('/') ||
+    tagName.includes('\\')
+  ) {
     return null;
   }
   const slash = repo.indexOf('/');
@@ -119,25 +130,35 @@ function canonicalGithubReleaseTagUrl(
     return null;
   }
   const parts = parsed.pathname.split('/').filter((part) => part.length > 0);
-  if (parts.length < 5 || parts[0] !== owner || parts[1] !== name) {
+  if (parts.length !== 5 || parts[0] !== owner || parts[1] !== name) {
     return null;
   }
   if (parts[2] !== 'releases' || parts[3] !== 'tag') {
     return null;
   }
-  let tagPath: string;
+  const rawTag = parts[4];
+  if (!rawTag || rawTag === '.' || rawTag === '..') {
+    return null;
+  }
+  let decodedTag: string;
   try {
-    tagPath = parts
-      .slice(4)
-      .map((part) => decodeURIComponent(part))
-      .join('/');
+    decodedTag = decodeURIComponent(rawTag);
   } catch {
     return null;
   }
-  if (tagPath !== tagName) {
+  if (
+    decodedTag !== tagName ||
+    decodedTag.includes('/') ||
+    decodedTag.includes('\\') ||
+    decodedTag === '.' ||
+    decodedTag === '..'
+  ) {
     return null;
   }
-  return `https://github.com/${owner}/${name}/releases/tag/${parts.slice(4).join('/')}`;
+  if (rawTag !== tagName && rawTag !== encodeURIComponent(tagName)) {
+    return null;
+  }
+  return `https://github.com/${owner}/${name}/releases/tag/${encodeURIComponent(tagName)}`;
 }
 
 /**
@@ -507,6 +528,7 @@ export default () => {
     5000,
     'appUpdates-initial-check'
   );
+  noteBackgroundCheckScheduled();
 
   interval = createTrackedInterval(
     runScheduledBackgroundCheck,
@@ -537,7 +559,16 @@ type UpdateTestGlobal = typeof globalThis & {
   __gogchatCheckForUpdatesManual?: typeof checkForUpdatesManual;
   __gogchatRunBackgroundUpdateCheck?: typeof runBackgroundUpdateCheck;
   __gogchatSetAutoCheckForUpdates?: (enabled: boolean) => void;
+  __gogchatBackgroundCheckScheduledAt?: number;
 };
+
+function noteBackgroundCheckScheduled(): void {
+  if (process.env['TESTING'] !== 'true') {
+    return;
+  }
+  const testGlobal = asType<UpdateTestGlobal>(globalThis);
+  testGlobal.__gogchatBackgroundCheckScheduledAt = Date.now();
+}
 
 /** Playwright seam. Installed only when `TESTING=true`. */
 export function installUpdateTestHooks(): void {

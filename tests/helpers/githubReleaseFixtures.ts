@@ -5,13 +5,7 @@
  */
 
 export type GithubUpdateFixtureKind =
-  | 'stable'
-  | 'draft-only'
-  | 'prerelease-only'
-  | 'malformed'
-  | 'empty'
-  | 'http-error'
-  | 'timeout';
+  'stable' | 'draft-only' | 'prerelease-only' | 'malformed' | 'empty' | 'http-error' | 'timeout';
 
 export interface GithubUpdateFixture {
   ok: boolean;
@@ -44,6 +38,45 @@ function stableReleaseList(stableUrl: string): unknown[] {
       prerelease: false,
     },
   ];
+}
+
+/** Failure fixtures must still contain the newer stable row the success path offers. */
+export function temptingStableRelease(
+  kind: 'http-error' | 'timeout',
+  stableUrl = GITHUB_UPDATE_STABLE_URL
+): { tag_name: string; html_url: string } {
+  const fixture = githubUpdateFixture(kind, stableUrl);
+  if (kind === 'http-error') {
+    if (fixture.ok !== false || fixture.status !== 503) {
+      throw new Error('http-error fixture must stay an HTTP failure');
+    }
+  } else if (fixture.ok !== true || fixture.status !== 200) {
+    throw new Error('timeout fixture must stay HTTP 200');
+  }
+  if (!Array.isArray(fixture.body)) {
+    throw new Error(`${kind} fixture body must stay a release list`);
+  }
+  const stable = fixture.body.find((entry) => {
+    if (typeof entry !== 'object' || entry === null) {
+      return false;
+    }
+    const row = entry as {
+      tag_name?: unknown;
+      html_url?: unknown;
+      draft?: unknown;
+      prerelease?: unknown;
+    };
+    return (
+      row.tag_name === 'v99.0.0' &&
+      row.html_url === stableUrl &&
+      row.draft === false &&
+      row.prerelease === false
+    );
+  }) as { tag_name: string; html_url: string } | undefined;
+  if (!stable) {
+    throw new Error(`${kind} fixture lost its newer stable release`);
+  }
+  return stable;
 }
 
 export function githubUpdateFixture(

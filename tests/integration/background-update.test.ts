@@ -24,6 +24,7 @@ import {
 import {
   GITHUB_UPDATE_STABLE_URL,
   githubUpdateFixture,
+  temptingStableRelease,
   type GithubUpdateFixtureKind,
 } from '../helpers/githubReleaseFixtures';
 
@@ -51,6 +52,7 @@ type BackgroundProbe = {
   snapshots: UpdateWindowSnapshot[];
   fetchUrls: string[];
   fetchHadAbortSignal: boolean;
+  fetchDelayMs: number | null;
   settled: boolean;
 };
 
@@ -101,6 +103,7 @@ async function probeBackground(
       const fetchUrls: string[] = [];
       const openedUrls: string[] = [];
       let fetchHadAbortSignal = false;
+      let fetchedAt = 0;
       const snapshots: UpdateWindowSnapshot[] = [];
 
       const readUpdateWindow = async (): Promise<UpdateWindowSnapshot | null> => {
@@ -134,7 +137,15 @@ async function probeBackground(
       };
 
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        fetchUrls.push(String(input));
+        const url = String(input);
+        const isReleaseFetch = url.includes('api.github.com/repos/') && url.includes('/releases');
+        if (!isReleaseFetch) {
+          return originalFetch(input, init);
+        }
+        if (fetchedAt === 0) {
+          fetchedAt = Date.now();
+        }
+        fetchUrls.push(url);
         fetchHadAbortSignal = init?.signal instanceof AbortSignal;
         if (args.kind === 'timeout') {
           const signal = init?.signal;
@@ -231,11 +242,15 @@ async function probeBackground(
           }
         }
         await record();
+        const scheduledAt =
+          (globalThis as { __gogchatBackgroundCheckScheduledAt?: number })
+            .__gogchatBackgroundCheckScheduledAt ?? 0;
         return {
           openedUrls,
           snapshots,
           fetchUrls,
           fetchHadAbortSignal,
+          fetchDelayMs: fetchedAt === 0 || scheduledAt === 0 ? null : fetchedAt - scheduledAt,
           settled: finished && !rejected,
         };
       } finally {
@@ -255,11 +270,15 @@ async function probeBackground(
 test.describe('background update silence', () => {
   test('opens only the validated stable URL and stays silent for failure fixtures', async () => {
     test.setTimeout(180_000);
-    const userData = await realpath(await mkdtemp(path.join(tmpdir(), 'gogchat-background-update-')));
+    const userData = await realpath(
+      await mkdtemp(path.join(tmpdir(), 'gogchat-background-update-'))
+    );
     let app: LaunchedElectronApp | undefined;
     const teardown: string[] = [];
 
     try {
+      expect(temptingStableRelease('http-error').html_url).toBe(GITHUB_UPDATE_STABLE_URL);
+      expect(temptingStableRelease('timeout').html_url).toBe(GITHUB_UPDATE_STABLE_URL);
       expect(FEATURE_CHUNK.endsWith('lib/chunks/appUpdates.js')).toBe(true);
       const builtFeature = await readFile(FEATURE_CHUNK, 'utf8');
       expect(builtFeature.includes('AbortSignal.timeout')).toBe(true);
@@ -284,6 +303,8 @@ test.describe('background update silence', () => {
 
       const stable = await probeBackground(app, 'stable', 'timer');
       expect(stable.settled).toBe(true);
+      expect(stable.fetchDelayMs).not.toBeNull();
+      expect(stable.fetchDelayMs ?? 0).toBeGreaterThanOrEqual(4_500);
       expect(stable.fetchHadAbortSignal).toBe(true);
       expect(
         stable.fetchUrls.some((url) =>

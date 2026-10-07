@@ -15,9 +15,16 @@ const {
 } = vi.hoisted(() => {
   const quit = { current: undefined as (() => void) | undefined };
   const latch = { current: undefined as (() => void) | undefined };
+  let nextTimerId = 10;
   return {
-    mockCreateTrackedTimeout: vi.fn(() => 1 as unknown as ReturnType<typeof setTimeout>),
-    mockCreateTrackedInterval: vi.fn(() => 2 as unknown as ReturnType<typeof setInterval>),
+    mockCreateTrackedTimeout: vi.fn(() => {
+      nextTimerId += 1;
+      return nextTimerId as unknown as ReturnType<typeof setTimeout>;
+    }),
+    mockCreateTrackedInterval: vi.fn(() => {
+      nextTimerId += 1;
+      return nextTimerId as unknown as ReturnType<typeof setInterval>;
+    }),
     mockCancelTrackedInterval: vi.fn(),
     mockCancelTrackedTimeout: vi.fn(),
     mockRegisterCleanupTask: vi.fn((name: string, callback: () => void) => {
@@ -101,6 +108,10 @@ import {
 import { openExternal } from '../utils/security/shellWrapper.js';
 import { validateExternalURL } from '../../shared/urlValidators.js';
 import { getPackageInfo } from '../utils/platform/packageInfo.js';
+import {
+  githubUpdateFixture,
+  GITHUB_UPDATE_STABLE_URL,
+} from '../../../tests/helpers/githubReleaseFixtures.js';
 
 const STABLE_V9 = {
   tag_name: 'v9.0.0',
@@ -282,13 +293,21 @@ describe('appUpdates background', () => {
 
   it('replaces the previous daily interval and initial timeout when appUpdates starts again', () => {
     appUpdates();
-    const intervalsAfterFirst = mockCancelTrackedInterval.mock.calls.length;
-    const timeoutsAfterFirst = mockCancelTrackedTimeout.mock.calls.length;
+    const firstTimeout = mockCreateTrackedTimeout.mock.results[0]?.value;
+    const firstInterval = mockCreateTrackedInterval.mock.results[0]?.value;
+    expect(firstTimeout).toBeDefined();
+    expect(firstInterval).toBeDefined();
+    expect(firstTimeout).not.toBe(firstInterval);
+
     appUpdates();
-    expect(mockCancelTrackedInterval.mock.calls.length).toBe(intervalsAfterFirst + 1);
-    expect(mockCancelTrackedTimeout.mock.calls.length).toBe(timeoutsAfterFirst + 1);
-    expect(mockCreateTrackedInterval).toHaveBeenCalledTimes(2);
-    expect(mockCreateTrackedTimeout).toHaveBeenCalledTimes(2);
+
+    expect(mockCancelTrackedTimeout).toHaveBeenLastCalledWith(firstTimeout);
+    expect(mockCancelTrackedInterval).toHaveBeenLastCalledWith(firstInterval);
+    expect(mockCancelTrackedTimeout).not.toHaveBeenCalledWith(firstInterval);
+    expect(mockCancelTrackedInterval).not.toHaveBeenCalledWith(firstTimeout);
+    const secondTimeout = mockCreateTrackedTimeout.mock.results.at(-1)?.value;
+    expect(secondTimeout).not.toBe(firstTimeout);
+    expect(mockCancelTrackedTimeout).not.toHaveBeenCalledWith(secondTimeout);
   });
 
   it('re-reads autoCheckForUpdates on every tick and stays silent when it is off', async () => {
@@ -650,6 +669,41 @@ describe('appUpdates background', () => {
     await pending;
 
     expectNoUpdateUi();
+    vi.mocked(fetch).mockClear();
+    resetManualUpdateGateForTests();
+    await runBackgroundUpdateCheck();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+  });
+
+  it('keeps a held session gate when only the shutdown latch is reset', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          })
+      )
+    );
+
+    const pending = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+    resetBackgroundShutdownForTests();
+    await runBackgroundUpdateCheck();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+
+    fireBeforeQuit();
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await pending;
+    expectNoUpdateUi();
+
+    vi.mocked(fetch).mockClear();
+    resetManualUpdateGateForTests();
+    await runBackgroundUpdateCheck();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expectNoUpdateUi();
   });
 
   it('does not open the release page when the cleanup task latches during the prompt', async () => {
@@ -847,10 +901,12 @@ describe('appUpdates background', () => {
       __gogchatRunBackgroundUpdateCheck?: unknown;
       __gogchatCheckForUpdatesManual?: unknown;
       __gogchatSetAutoCheckForUpdates?: (enabled: boolean) => void;
+      __gogchatBackgroundCheckScheduledAt?: number;
     };
     delete globals.__gogchatRunBackgroundUpdateCheck;
     delete globals.__gogchatCheckForUpdatesManual;
     delete globals.__gogchatSetAutoCheckForUpdates;
+    delete globals.__gogchatBackgroundCheckScheduledAt;
     try {
       delete process.env['TESTING'];
       installUpdateTestHooks();
@@ -863,10 +919,15 @@ describe('appUpdates background', () => {
       expect(globals.__gogchatCheckForUpdatesManual).toBe(checkForUpdatesManual);
       globals.__gogchatSetAutoCheckForUpdates?.(false);
       expect(configSet).toHaveBeenCalledWith('app.autoCheckForUpdates', false);
+      const beforeSchedule = Date.now();
+      appUpdates();
+      expect(globals.__gogchatBackgroundCheckScheduledAt).toBeGreaterThanOrEqual(beforeSchedule);
+      expect(globals.__gogchatBackgroundCheckScheduledAt ?? 0).toBeLessThanOrEqual(Date.now());
     } finally {
       delete globals.__gogchatRunBackgroundUpdateCheck;
       delete globals.__gogchatCheckForUpdatesManual;
       delete globals.__gogchatSetAutoCheckForUpdates;
+      delete globals.__gogchatBackgroundCheckScheduledAt;
       if (previous === undefined) {
         delete process.env['TESTING'];
       } else {
@@ -877,6 +938,19 @@ describe('appUpdates background', () => {
 });
 
 describe('stable GitHub release parser', () => {
+  it('treats http-error and timeout fixtures as a newer stable list behind the failure', () => {
+    for (const kind of ['http-error', 'timeout'] as const) {
+      const fixture = githubUpdateFixture(kind);
+      expect(fixture.ok).toBe(kind !== 'http-error');
+      expect(fixture.status).toBe(kind === 'http-error' ? 503 : 200);
+      expect(appUpdatesModule.selectFirstStableGithubRelease(fixture.body, RELEASE_REPO)).toEqual({
+        tag_name: 'v99.0.0',
+        html_url: GITHUB_UPDATE_STABLE_URL,
+        body: 'Local fixture notes',
+      });
+    }
+  });
+
   it('accepts only a valid tag, HTTPS url, and draft === false / prerelease === false', () => {
     const parse = getReleaseParser();
 
@@ -959,6 +1033,46 @@ describe('stable GitHub release parser', () => {
     ).toEqual({
       tag_name: 'v9.0.0',
       html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+      body: 'Release notes',
+    });
+    const encodedTraversal =
+      'v99.0.0%2F..%2F..%2F..%2F..%2Fother%2Frepo%2Freleases%2Fdownload%2Fx%2Fmalware';
+    expect(
+      parse({
+        ...STABLE_V9,
+        tag_name: 'v99.0.0/../../../../other/repo/releases/download/x/malware',
+        html_url: `https://github.com/iworkforces/GogChat/releases/tag/${encodedTraversal}`,
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9%2e0%2e0',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        tag_name: '..',
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/%2e%2e',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        tag_name: '../',
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/%2e%2e%2f',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        tag_name: 'v1.0.0+build',
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v1.0.0%2Bbuild',
+      })
+    ).toEqual({
+      tag_name: 'v1.0.0+build',
+      html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v1.0.0%2Bbuild',
       body: 'Release notes',
     });
     expect(parse({ ...STABLE_V9, body: 12 })).toEqual({
