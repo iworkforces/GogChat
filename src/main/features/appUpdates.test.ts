@@ -4,15 +4,37 @@
 /* global AbortSignal, AbortController, RequestInit, RequestInfo, Response, URL */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('electron-update-notifier', () => ({
-  setUpdateNotification: vi.fn(),
-  checkForUpdates: vi.fn(),
-}));
+const {
+  mockCreateTrackedTimeout,
+  mockCreateTrackedInterval,
+  mockCancelTrackedInterval,
+  mockCancelTrackedTimeout,
+  mockRegisterCleanupTask,
+  beforeQuitHandler,
+  cleanupLatch,
+} = vi.hoisted(() => {
+  const quit = { current: undefined as (() => void) | undefined };
+  const latch = { current: undefined as (() => void) | undefined };
+  return {
+    mockCreateTrackedTimeout: vi.fn(() => 1 as unknown as ReturnType<typeof setTimeout>),
+    mockCreateTrackedInterval: vi.fn(() => 2 as unknown as ReturnType<typeof setInterval>),
+    mockCancelTrackedInterval: vi.fn(),
+    mockCancelTrackedTimeout: vi.fn(),
+    mockRegisterCleanupTask: vi.fn((name: string, callback: () => void) => {
+      if (name === 'appUpdates-suppress-prompts') latch.current = callback;
+    }),
+    beforeQuitHandler: quit,
+    cleanupLatch: latch,
+  };
+});
 
 vi.mock('electron', () => ({
   app: {
     getVersion: vi.fn().mockReturnValue('3.0.0'),
     isPackaged: true,
+    on: vi.fn((event: string, handler: () => void) => {
+      if (event === 'before-quit') beforeQuitHandler.current = handler;
+    }),
   },
 }));
 
@@ -20,25 +42,17 @@ vi.mock('electron-log', () => ({
   default: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-const { mockCreateTrackedTimeout, mockCreateTrackedInterval } = vi.hoisted(() => ({
-  mockCreateTrackedTimeout: vi.fn((fn: () => void) => {
-    fn();
-    return 1 as unknown as ReturnType<typeof setTimeout>;
-  }),
-  mockCreateTrackedInterval: vi.fn((fn: () => void) => {
-    fn();
-    return 1 as unknown as ReturnType<typeof setInterval>;
-  }),
-}));
-
 vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
-  cancelTrackedInterval: (handle: NodeJS.Timeout) => clearInterval(handle),
+  cancelTrackedInterval: mockCancelTrackedInterval,
+  cancelTrackedTimeout: mockCancelTrackedTimeout,
   createTrackedTimeout: mockCreateTrackedTimeout,
   createTrackedInterval: mockCreateTrackedInterval,
+  registerCleanupTask: mockRegisterCleanupTask,
 }));
 
 vi.mock('../config.js', () => ({
   configGet: vi.fn().mockReturnValue(true),
+  configSet: vi.fn(),
 }));
 
 vi.mock('../utils/platform/packageInfo.js', () => ({
@@ -69,15 +83,23 @@ vi.mock('./menuActionRegistry.js', () => ({
 import appUpdates, {
   checkForUpdatesManual,
   githubRepoSlug,
+  installUpdateTestHooks,
   isVersionNewer,
+  resetBackgroundShutdownForTests,
   resetManualUpdateGateForTests,
+  runBackgroundUpdateCheck,
 } from './appUpdates';
 import * as appUpdatesModule from './appUpdates';
-import { setUpdateNotification, checkForUpdates } from 'electron-update-notifier';
 import { app } from 'electron';
-import { configGet } from '../config.js';
-import { presentUpdateDialog, isUpdateSessionDismissed } from '../utils/platform/updateWindow.js';
+import log from 'electron-log';
+import { configGet, configSet } from '../config.js';
+import {
+  beginUpdateDialogSession,
+  presentUpdateDialog,
+  isUpdateSessionDismissed,
+} from '../utils/platform/updateWindow.js';
 import { openExternal } from '../utils/security/shellWrapper.js';
+import { validateExternalURL } from '../../shared/urlValidators.js';
 import { getPackageInfo } from '../utils/platform/packageInfo.js';
 
 const STABLE_V9 = {
@@ -102,18 +124,18 @@ type ReleaseParser = (value: unknown) => {
   body?: string;
 } | null;
 
+const RELEASE_REPO = 'iworkforces/GogChat';
+
 function getReleaseParser(): ReleaseParser {
-  const parse = (appUpdatesModule as { parseStableGithubRelease?: ReleaseParser })
-    .parseStableGithubRelease;
+  const parse = appUpdatesModule.parseStableGithubRelease;
   expect(parse).toEqual(expect.any(Function));
-  return parse as ReleaseParser;
+  return (value: unknown) => parse(value, RELEASE_REPO);
 }
 
 function getReleaseSelector(): ReleaseParser {
-  const select = (appUpdatesModule as { selectFirstStableGithubRelease?: ReleaseParser })
-    .selectFirstStableGithubRelease;
+  const select = appUpdatesModule.selectFirstStableGithubRelease;
   expect(select).toEqual(expect.any(Function));
-  return select as ReleaseParser;
+  return (value: unknown) => select(value, RELEASE_REPO);
 }
 
 function hungFetch(init: RequestInit | undefined): Promise<Response> {
@@ -162,13 +184,89 @@ describe('appUpdates helpers', () => {
   });
 });
 
+function timerCallback(calls: readonly unknown[][]): () => void {
+  const callback = calls[0]?.[0];
+  expect(callback).toEqual(expect.any(Function));
+  return callback as () => void;
+}
+
+function loggedText(): string {
+  return vi
+    .mocked(log.error)
+    .mock.calls.map((call) =>
+      call
+        .map((part) => {
+          if (part instanceof Error) {
+            return `${part.message}\n${part.stack ?? ''}`;
+          }
+          return String(part);
+        })
+        .join(' ')
+    )
+    .join('\n');
+}
+
+function fireBeforeQuit(): void {
+  expect(beforeQuitHandler.current).toEqual(expect.any(Function));
+  beforeQuitHandler.current?.();
+}
+
+function latchCleanupTask(): void {
+  expect(cleanupLatch.current).toEqual(expect.any(Function));
+  cleanupLatch.current?.();
+}
+
+function expectNoUpdateUi(): void {
+  expect(presentUpdateDialog).not.toHaveBeenCalled();
+  expect(beginUpdateDialogSession).not.toHaveBeenCalled();
+  expect(openExternal).not.toHaveBeenCalled();
+}
+
+async function withNoUnhandledRejection(run: () => Promise<void>): Promise<void> {
+  const reasons: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    reasons.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    await run();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(reasons).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+}
+
 describe('appUpdates background', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetManualUpdateGateForTests();
+    resetBackgroundShutdownForTests();
     vi.mocked(configGet).mockReturnValue(true);
+    vi.mocked(isUpdateSessionDismissed).mockReturnValue(false);
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 1 });
+    vi.mocked(openExternal).mockResolvedValue(undefined);
+    vi.mocked(getPackageInfo).mockReturnValue({
+      repository: 'https://github.com/iworkforces/GogChat',
+      productName: 'GogChat',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [STABLE_V9],
+      })
+    );
   });
 
-  it('schedules initial and daily checks', () => {
+  afterEach(() => {
+    resetManualUpdateGateForTests();
+    resetBackgroundShutdownForTests();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('schedules the first check at 5 seconds and then every 24 hours', () => {
     appUpdates();
     expect(mockCreateTrackedTimeout).toHaveBeenCalledWith(
       expect.any(Function),
@@ -182,17 +280,599 @@ describe('appUpdates background', () => {
     );
   });
 
-  it('skips checks when auto-check is disabled', () => {
-    vi.mocked(configGet).mockReturnValue(false);
+  it('replaces the previous daily interval and initial timeout when appUpdates starts again', () => {
     appUpdates();
-    expect(setUpdateNotification).not.toHaveBeenCalled();
-    expect(checkForUpdates).not.toHaveBeenCalled();
+    const intervalsAfterFirst = mockCancelTrackedInterval.mock.calls.length;
+    const timeoutsAfterFirst = mockCancelTrackedTimeout.mock.calls.length;
+    appUpdates();
+    expect(mockCancelTrackedInterval.mock.calls.length).toBe(intervalsAfterFirst + 1);
+    expect(mockCancelTrackedTimeout.mock.calls.length).toBe(timeoutsAfterFirst + 1);
+    expect(mockCreateTrackedInterval).toHaveBeenCalledTimes(2);
+    expect(mockCreateTrackedTimeout).toHaveBeenCalledTimes(2);
   });
 
-  it('calls setUpdateNotification and checkForUpdates when auto-check is enabled', () => {
+  it('re-reads autoCheckForUpdates on every tick and stays silent when it is off', async () => {
     appUpdates();
-    expect(setUpdateNotification).toHaveBeenCalled();
-    expect(checkForUpdates).toHaveBeenCalled();
+    const tick = timerCallback(mockCreateTrackedTimeout.mock.calls);
+    vi.mocked(configGet).mockReturnValue(false);
+    tick();
+    await Promise.resolve();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+    expect(configGet).toHaveBeenCalledWith('app.autoCheckForUpdates');
+
+    vi.mocked(configGet).mockReturnValue(true);
+    vi.mocked(configGet).mockClear();
+    await withNoUnhandledRejection(async () => {
+      tick();
+      await vi.waitFor(() => expect(presentUpdateDialog).toHaveBeenCalled());
+    });
+    expect(configGet).toHaveBeenCalledWith('app.autoCheckForUpdates');
+    expect(presentUpdateDialog).not.toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'checking' })
+    );
+    expect(presentUpdateDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'result',
+        message: 'New release available',
+        buttons: ['Download', 'Later'],
+      })
+    );
+  });
+
+  it('runs the same check from the daily interval', async () => {
+    appUpdates();
+    const daily = timerCallback(mockCreateTrackedInterval.mock.calls);
+    await withNoUnhandledRejection(async () => {
+      daily();
+      await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
+    });
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      'https://api.github.com/repos/iworkforces/GogChat/releases',
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      })
+    );
+  });
+
+  it('does not surface an unhandled rejection from a scheduled tick', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new Error('https://user:pass@evil.example/secret'))
+    );
+    appUpdates();
+    const tick = timerCallback(mockCreateTrackedTimeout.mock.calls);
+    await withNoUnhandledRejection(async () => {
+      tick();
+      await vi.waitFor(() => expect(log.error).toHaveBeenCalled());
+    });
+    expectNoUpdateUi();
+    expect(loggedText()).toContain('[redacted]');
+    expect(loggedText()).not.toContain('evil.example');
+    expect(loggedText()).not.toContain('secret');
+  });
+
+  it('stays packaged-only unless TESTING=true', async () => {
+    const previousPackaged = app.isPackaged;
+    const previousTesting = process.env['TESTING'];
+    app.isPackaged = false;
+    delete process.env['TESTING'];
+    try {
+      await runBackgroundUpdateCheck();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expectNoUpdateUi();
+
+      process.env['TESTING'] = 'true';
+      await runBackgroundUpdateCheck();
+      expect(vi.mocked(fetch)).toHaveBeenCalled();
+    } finally {
+      app.isPackaged = previousPackaged;
+      if (previousTesting === undefined) {
+        delete process.env['TESTING'];
+      } else {
+        process.env['TESTING'] = previousTesting;
+      }
+    }
+  });
+
+  it('stays silent for draft-only, malformed, empty, and non-GitHub release lists', async () => {
+    const payloads: unknown[] = [
+      [{ ...STABLE_V9, draft: true }],
+      [
+        {
+          ...STABLE_V9,
+          prerelease: true,
+          tag_name: 'v10.0.0-rc.1',
+          html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v10.0.0-rc.1',
+        },
+      ],
+      { not: 'an-array', html_url: 'https://evil.example/secret-token' },
+      [],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'http://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+        },
+      ],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'https://evil.example/releases/tag/v9.0.0',
+        },
+      ],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'https://github.com/iworkforces/GogChat/releases/download/v9.0.0/GogChat.dmg',
+        },
+      ],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'https://user:pass@github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+        },
+      ],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'https://github.com/other/repo/releases/tag/v9.0.0',
+        },
+      ],
+      [
+        {
+          ...STABLE_V9,
+          html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0?asset=1',
+        },
+      ],
+    ];
+
+    for (const payload of payloads) {
+      vi.mocked(presentUpdateDialog).mockClear();
+      vi.mocked(beginUpdateDialogSession).mockClear();
+      vi.mocked(openExternal).mockClear();
+      vi.mocked(log.error).mockClear();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => payload,
+        })
+      );
+
+      await runBackgroundUpdateCheck();
+      expectNoUpdateUi();
+      const text = loggedText();
+      expect(text).toContain('no stable release');
+      expect(text).not.toContain('evil.example');
+      expect(text).not.toContain('secret-token');
+    }
+  });
+
+  it('stays silent when the first stable release is older, even if a later entry is newer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            ...STABLE_V9,
+            tag_name: 'v1.0.0',
+            html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v1.0.0',
+          },
+          STABLE_V9,
+        ],
+      })
+    );
+
+    await runBackgroundUpdateCheck();
+    expectNoUpdateUi();
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('prompts for the first stable release after a prerelease and downloads only that URL', async () => {
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 0 });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            ...STABLE_V9,
+            prerelease: true,
+            tag_name: 'v10.0.0-rc.1',
+            html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v10.0.0-rc.1',
+          },
+          {
+            ...STABLE_V9,
+            draft: true,
+            tag_name: 'v10.0.0-draft',
+            html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v10.0.0-draft',
+          },
+          STABLE_V9,
+        ],
+      })
+    );
+
+    await runBackgroundUpdateCheck();
+    expect(presentUpdateDialog).not.toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'checking' })
+    );
+    expect(presentUpdateDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'result',
+        message: 'New release available',
+        detail: expect.stringContaining('Release notes'),
+      })
+    );
+    expect(validateExternalURL).toHaveBeenCalledWith(STABLE_V9.html_url);
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    expect(openExternal).toHaveBeenCalledWith(STABLE_V9.html_url);
+  });
+
+  it('does not open a URL when the user dismisses the background prompt', async () => {
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 1 });
+    await runBackgroundUpdateCheck();
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(validateExternalURL).not.toHaveBeenCalled();
+  });
+
+  it('logs sanitized failures for HTTP errors, rejected fetches, and broken JSON', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => [STABLE_V9],
+      })
+    );
+    await withNoUnhandledRejection(() => runBackgroundUpdateCheck());
+    expectNoUpdateUi();
+    expect(loggedText()).toContain('[redacted]');
+    expect(loggedText()).not.toContain('503');
+    expect(loggedText()).not.toContain('GitHub releases HTTP');
+    expect(loggedText()).not.toContain('releases/tag');
+    expect(openExternal).not.toHaveBeenCalled();
+
+    vi.mocked(log.error).mockClear();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => {
+          throw new Error('https://evil.example/secret-token');
+        },
+      })
+    );
+    await withNoUnhandledRejection(() => runBackgroundUpdateCheck());
+    expectNoUpdateUi();
+    expect(loggedText()).not.toContain('evil.example');
+    expect(loggedText()).not.toContain('secret-token');
+    expect(loggedText()).toContain('[redacted]');
+  });
+
+  it('aborts a hung background fetch at 10 seconds without UI and releases the gate', async () => {
+    vi.useFakeTimers();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      setTimeout(() => {
+        controller.abort(new DOMException('The operation was aborted.', 'TimeoutError'));
+      }, ms);
+      return controller.signal;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) => hungFetch(init))
+    );
+
+    const first = runBackgroundUpdateCheck();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+    expect(log.error).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(log.error).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await first;
+
+    expectNoUpdateUi();
+    expect(loggedText()).toContain('[redacted]');
+    expect(loggedText()).not.toContain('aborted');
+
+    timeoutSpy.mockRestore();
+    vi.useRealTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [STABLE_V9],
+      })
+    );
+    vi.mocked(presentUpdateDialog).mockClear();
+
+    await runBackgroundUpdateCheck();
+    expect(presentUpdateDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: 'result',
+        message: 'New release available',
+      })
+    );
+  });
+
+  it('discards an in-flight result when auto-check is switched off', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          })
+      )
+    );
+
+    const pending = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
+    vi.mocked(configGet).mockReturnValue(false);
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await pending;
+
+    expectNoUpdateUi();
+  });
+
+  it('does not fetch or present after shutdown cleanup has started', async () => {
+    fireBeforeQuit();
+    await runBackgroundUpdateCheck();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+  });
+
+  it('discards an in-flight result when resource cleanup is in progress', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          })
+      )
+    );
+
+    const pending = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
+    latchCleanupTask();
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await pending;
+
+    expectNoUpdateUi();
+  });
+
+  it('does not open the release page when the cleanup task latches during the prompt', async () => {
+    vi.mocked(presentUpdateDialog).mockImplementation(async () => {
+      latchCleanupTask();
+      return { response: 0 };
+    });
+
+    await runBackgroundUpdateCheck();
+    expect(presentUpdateDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'result', message: 'New release available' })
+    );
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it('logs a static repository failure without fetching or presenting', async () => {
+    vi.mocked(getPackageInfo).mockReturnValueOnce({
+      repository: 'https://evil.example/not-github',
+      productName: 'GogChat',
+    } as never);
+
+    await runBackgroundUpdateCheck();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expectNoUpdateUi();
+    expect(loggedText()).toContain('repository metadata is missing');
+    expect(loggedText()).not.toContain('evil.example');
+  });
+
+  it('skips a second background check while the first session is in flight', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          })
+      )
+    );
+
+    const first = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+    const second = runBackgroundUpdateCheck();
+    await second;
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(beginUpdateDialogSession).not.toHaveBeenCalled();
+
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await first;
+    expect(beginUpdateDialogSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a scheduled tick while a manual session is in progress', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          })
+      )
+    );
+
+    const manual = checkForUpdatesManual();
+    await vi.waitFor(() => expect(presentUpdateDialog).toHaveBeenCalled());
+    const presents = vi.mocked(presentUpdateDialog).mock.calls.length;
+    const begins = vi.mocked(beginUpdateDialogSession).mock.calls.length;
+
+    appUpdates();
+    timerCallback(mockCreateTrackedTimeout.mock.calls)();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(presentUpdateDialog).toHaveBeenCalledTimes(presents);
+    expect(beginUpdateDialogSession).toHaveBeenCalledTimes(begins);
+
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await manual;
+  });
+
+  it('does not let a manual request reset or supersede an in-flight background session', async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    let fetches = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        fetches += 1;
+        if (fetches === 1) {
+          return new Promise((resolve) => {
+            release = resolve;
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [STABLE_V9] });
+      })
+    );
+
+    const background = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+    expect(beginUpdateDialogSession).not.toHaveBeenCalled();
+    expect(presentUpdateDialog).not.toHaveBeenCalled();
+
+    const manual = checkForUpdatesManual();
+    const extraManual = checkForUpdatesManual();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(beginUpdateDialogSession).not.toHaveBeenCalled();
+    expect(presentUpdateDialog).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    await extraManual;
+
+    release({ ok: true, json: async () => [STABLE_V9] });
+    await background;
+    await manual;
+
+    const phases = vi.mocked(presentUpdateDialog).mock.calls.map((call) => {
+      const options = call[0] as { phase?: string };
+      return options.phase;
+    });
+    expect(phases[0]).toBe('result');
+    expect(phases).toContain('checking');
+    expect(beginUpdateDialogSession).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(presentUpdateDialog).mock.calls.filter((call) => {
+        const options = call[0] as { phase?: string };
+        return options.phase === 'checking';
+      })
+    ).toHaveLength(1);
+  });
+
+  it('does not reset dismissal or supersede a background prompt that is already up', async () => {
+    let releaseDialog!: (value: { response: number }) => void;
+    vi.mocked(presentUpdateDialog).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseDialog = resolve;
+        })
+    );
+
+    const background = runBackgroundUpdateCheck();
+    await vi.waitFor(() => expect(beginUpdateDialogSession).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(presentUpdateDialog).toHaveBeenCalledTimes(1));
+
+    const manual = checkForUpdatesManual();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(beginUpdateDialogSession).toHaveBeenCalledTimes(1);
+    expect(presentUpdateDialog).toHaveBeenCalledTimes(1);
+    expect(openExternal).not.toHaveBeenCalled();
+
+    releaseDialog({ response: 0 });
+    await background;
+    await manual;
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    expect(openExternal).toHaveBeenCalledWith(STABLE_V9.html_url);
+    expect(beginUpdateDialogSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs a sanitized open failure and still settles', async () => {
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 0 });
+    vi.mocked(openExternal).mockRejectedValueOnce(
+      new Error('https://user:pass@evil.example/secret')
+    );
+    await withNoUnhandledRejection(async () => {
+      await runBackgroundUpdateCheck();
+    });
+    expect(openExternal).toHaveBeenCalledWith(STABLE_V9.html_url);
+    expect(loggedText()).toContain('[redacted]');
+    expect(loggedText()).not.toContain('evil.example');
+    expect(loggedText()).not.toContain('secret');
+  });
+
+  it('settles when the result dialog rejects and then allows another check', async () => {
+    vi.mocked(presentUpdateDialog).mockRejectedValueOnce(new Error('https://dialog.example/boom'));
+    await withNoUnhandledRejection(async () => {
+      await runBackgroundUpdateCheck();
+    });
+    expect(loggedText()).toContain('[redacted]');
+    expect(loggedText()).not.toContain('dialog.example');
+
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 1 });
+    vi.mocked(presentUpdateDialog).mockClear();
+    await runBackgroundUpdateCheck();
+    expect(presentUpdateDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'New release available' })
+    );
+  });
+
+  it('installs Playwright hooks only when TESTING=true', () => {
+    const previous = process.env['TESTING'];
+    const globals = globalThis as {
+      __gogchatRunBackgroundUpdateCheck?: unknown;
+      __gogchatCheckForUpdatesManual?: unknown;
+      __gogchatSetAutoCheckForUpdates?: (enabled: boolean) => void;
+    };
+    delete globals.__gogchatRunBackgroundUpdateCheck;
+    delete globals.__gogchatCheckForUpdatesManual;
+    delete globals.__gogchatSetAutoCheckForUpdates;
+    try {
+      delete process.env['TESTING'];
+      installUpdateTestHooks();
+      expect(globals.__gogchatRunBackgroundUpdateCheck).toBeUndefined();
+      expect(globals.__gogchatCheckForUpdatesManual).toBeUndefined();
+
+      process.env['TESTING'] = 'true';
+      installUpdateTestHooks();
+      expect(globals.__gogchatRunBackgroundUpdateCheck).toBe(runBackgroundUpdateCheck);
+      expect(globals.__gogchatCheckForUpdatesManual).toBe(checkForUpdatesManual);
+      globals.__gogchatSetAutoCheckForUpdates?.(false);
+      expect(configSet).toHaveBeenCalledWith('app.autoCheckForUpdates', false);
+    } finally {
+      delete globals.__gogchatRunBackgroundUpdateCheck;
+      delete globals.__gogchatCheckForUpdatesManual;
+      delete globals.__gogchatSetAutoCheckForUpdates;
+      if (previous === undefined) {
+        delete process.env['TESTING'];
+      } else {
+        process.env['TESTING'] = previous;
+      }
+    }
   });
 });
 
@@ -240,6 +920,47 @@ describe('stable GitHub release parser', () => {
         html_url: 'https://github.com/iworkforces/GogChat/issues/1',
       })
     ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://github.com/iworkforces/GogChat/releases/download/v9.0.0/GogChat.dmg',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://user:pass@github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0?asset=1',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://github.com/other/repo/releases/tag/v9.0.0',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        tag_name: 'v8.0.0',
+        html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+      })
+    ).toBeNull();
+    expect(
+      parse({
+        ...STABLE_V9,
+        html_url: 'https://www.github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+      })
+    ).toEqual({
+      tag_name: 'v9.0.0',
+      html_url: 'https://github.com/iworkforces/GogChat/releases/tag/v9.0.0',
+      body: 'Release notes',
+    });
     expect(parse({ ...STABLE_V9, body: 12 })).toEqual({
       tag_name: 'v9.0.0',
       html_url: STABLE_V9.html_url,
@@ -292,6 +1013,7 @@ describe('checkForUpdatesManual', () => {
 
   afterEach(() => {
     resetManualUpdateGateForTests();
+    resetBackgroundShutdownForTests();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -539,7 +1261,7 @@ describe('checkForUpdatesManual', () => {
       },
       {
         name: 'http-failure',
-        fetch: async () => ({ ok: false, status: 503, json: async () => null }),
+        fetch: async () => ({ ok: false, status: 503, json: async () => [STABLE_V9] }),
       },
       {
         name: 'dismissal',
@@ -564,6 +1286,14 @@ describe('checkForUpdatesManual', () => {
         expect.objectContaining({ phase: 'checking' })
       );
       expect(vi.mocked(presentUpdateDialog).mock.calls.length, scenario.name).toBeGreaterThan(1);
+      if (scenario.name === 'http-failure') {
+        expect(presentUpdateDialog, scenario.name).toHaveBeenCalledWith(
+          expect.objectContaining({ message: 'Couldn’t check for updates' })
+        );
+        expect(presentUpdateDialog, scenario.name).not.toHaveBeenCalledWith(
+          expect.objectContaining({ message: 'New release available' })
+        );
+      }
     }
   });
 
@@ -653,21 +1383,5 @@ describe('checkForUpdatesManual', () => {
         detail: expect.not.stringMatching(/\n\n/),
       })
     );
-  });
-
-  it('does not change the background notifier schedule', () => {
-    appUpdates();
-    expect(mockCreateTrackedTimeout).toHaveBeenCalledWith(
-      expect.any(Function),
-      5000,
-      'appUpdates-initial-check'
-    );
-    expect(mockCreateTrackedInterval).toHaveBeenCalledWith(
-      expect.any(Function),
-      1000 * 60 * 60 * 24,
-      'appUpdates-daily-check'
-    );
-    expect(setUpdateNotification).toHaveBeenCalled();
-    expect(checkForUpdates).toHaveBeenCalled();
   });
 });

@@ -1,16 +1,19 @@
 /**
- * Update checks — background silent poll (electron-update-notifier) plus
- * manual “Check for Updates…” via the native aurora update window.
+ * Update checks — silent background poll plus manual “Check for Updates…”
+ * via the native aurora update window. Both modes share one session gate and
+ * the validated GitHub release pipeline.
  */
 
 import { app } from 'electron';
-import { setUpdateNotification, checkForUpdates } from 'electron-update-notifier';
 import log from 'electron-log';
-import { configGet } from '../config.js';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
+import { configGet, configSet } from '../config.js';
 import {
   cancelTrackedInterval,
+  cancelTrackedTimeout,
   createTrackedInterval,
   createTrackedTimeout,
+  registerCleanupTask,
 } from '../utils/lifecycle/resourceCleanup.js';
 import { getPackageInfo } from '../utils/platform/packageInfo.js';
 import {
@@ -24,12 +27,47 @@ import { openExternal } from '../utils/security/shellWrapper.js';
 import { registerMenuAction } from './menuActionRegistry.js';
 
 let interval: ReturnType<typeof setInterval> | null = null;
-/** Single-flight guard for manual check sessions. */
-let manualGate = false;
+let initialCheck: ReturnType<typeof setTimeout> | null = null;
+/**
+ * One update session at a time. Taken before `beginUpdateDialogSession()` and
+ * held through Download so another entry cannot clear that session's dismissal
+ * flag or supersede its pending prompt. Released in `finally`.
+ */
+let updateSessionGate = false;
+type UpdateSessionOwner = 'manual' | 'background';
+let sessionOwner: UpdateSessionOwner | null = null;
+/** One manual check waiting for a background session to finish. */
+let manualWaiter: (() => void) | null = null;
+let manualWaitGeneration = 0;
+/** Latches on `before-quit` and the update cleanup task. */
+let backgroundShutdown = false;
 
-/** Test-only: release the single-flight guard after a hung or aborted case. */
+/** Test-only: release the shared session gate after a hung or aborted case. */
 export function resetManualUpdateGateForTests(): void {
-  manualGate = false;
+  updateSessionGate = false;
+  sessionOwner = null;
+  manualWaitGeneration += 1;
+  const wake = manualWaiter;
+  manualWaiter = null;
+  wake?.();
+}
+
+/** Test-only: clear the shutdown latch without touching the session gate. */
+export function resetBackgroundShutdownForTests(): void {
+  backgroundShutdown = false;
+}
+
+function shutdownBlocksUpdateUi(): boolean {
+  return backgroundShutdown;
+}
+
+function releaseUpdateSession(): void {
+  updateSessionGate = false;
+  sessionOwner = null;
+  const wake = manualWaiter;
+  if (wake) {
+    void Promise.resolve().then(wake);
+  }
 }
 
 /** Deadline for the user-initiated GitHub releases fetch. */
@@ -45,30 +83,68 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isGithubReleaseHtmlUrl(value: unknown): value is string {
+/**
+ * `https://github.com/<repo>/releases/tag/<tag>` only.
+ * Rejects userinfo, query, hash, other repos, and `/releases/download` or `/latest`.
+ * `www.github.com` is stored as `github.com`.
+ */
+function canonicalGithubReleaseTagUrl(
+  value: unknown,
+  repo: string,
+  tagName: string
+): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2048) {
-    return false;
+    return null;
   }
+  const slash = repo.indexOf('/');
+  if (slash <= 0 || slash !== repo.lastIndexOf('/') || slash === repo.length - 1) {
+    return null;
+  }
+  const owner = repo.slice(0, slash);
+  const name = repo.slice(slash + 1);
+  let parsed: URL;
   try {
-    const parsed = new URL(value);
-    const host = parsed.hostname;
-    if (parsed.protocol !== 'https:') {
-      return false;
-    }
-    if (host !== 'github.com' && host !== 'www.github.com') {
-      return false;
-    }
-    return /^\/[^/]+\/[^/]+\/releases\//.test(parsed.pathname);
+    parsed = new URL(value);
   } catch {
-    return false;
+    return null;
   }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
+    return null;
+  }
+  if (parsed.search !== '' || parsed.hash !== '') {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'github.com' && host !== 'www.github.com') {
+    return null;
+  }
+  const parts = parsed.pathname.split('/').filter((part) => part.length > 0);
+  if (parts.length < 5 || parts[0] !== owner || parts[1] !== name) {
+    return null;
+  }
+  if (parts[2] !== 'releases' || parts[3] !== 'tag') {
+    return null;
+  }
+  let tagPath: string;
+  try {
+    tagPath = parts
+      .slice(4)
+      .map((part) => decodeURIComponent(part))
+      .join('/');
+  } catch {
+    return null;
+  }
+  if (tagPath !== tagName) {
+    return null;
+  }
+  return `https://github.com/${owner}/${name}/releases/tag/${parts.slice(4).join('/')}`;
 }
 
 /**
  * Parse one GitHub Releases API object from untrusted JSON.
- * Requires a non-empty tag, an HTTPS html_url, and explicit stable flags.
+ * Requires a non-empty tag, a canonical tag URL for `repo`, and explicit stable flags.
  */
-export function parseStableGithubRelease(value: unknown): StableGithubRelease | null {
+export function parseStableGithubRelease(value: unknown, repo: string): StableGithubRelease | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -79,8 +155,8 @@ export function parseStableGithubRelease(value: unknown): StableGithubRelease | 
   if (typeof tagName !== 'string' || tagName.trim().length === 0) {
     return null;
   }
-  const htmlUrl = value['html_url'];
-  if (!isGithubReleaseHtmlUrl(htmlUrl)) {
+  const htmlUrl = canonicalGithubReleaseTagUrl(value['html_url'], repo, tagName);
+  if (!htmlUrl) {
     return null;
   }
 
@@ -95,13 +171,16 @@ export function parseStableGithubRelease(value: unknown): StableGithubRelease | 
   return release;
 }
 
-/** First valid stable entry in a GitHub Releases API array. */
-export function selectFirstStableGithubRelease(payload: unknown): StableGithubRelease | null {
+/** First valid stable entry in a GitHub Releases API array for `repo`. */
+export function selectFirstStableGithubRelease(
+  payload: unknown,
+  repo: string
+): StableGithubRelease | null {
   if (!Array.isArray(payload)) {
     return null;
   }
   for (const entry of payload) {
-    const parsed = parseStableGithubRelease(entry);
+    const parsed = parseStableGithubRelease(entry, repo);
     if (parsed) {
       return parsed;
     }
@@ -173,16 +252,36 @@ async function fetchLatestRelease(repo: string): Promise<StableGithubRelease | n
     throw new Error(`GitHub releases HTTP ${response.status}`);
   }
   const payload: unknown = await response.json();
-  return selectFirstStableGithubRelease(payload);
+  return selectFirstStableGithubRelease(payload, repo);
 }
 
-async function openReleasePage(url: string): Promise<void> {
+function releaseAvailableDetail(latest: StableGithubRelease): string {
+  const bodySnippet = (latest.body ?? '').trim().slice(0, 400);
+  return [
+    `Installed: v${app.getVersion()}`,
+    `Latest: ${latest.tag_name}`,
+    bodySnippet.length > 0 ? `\n${bodySnippet}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function openReleasePage(url: string, repo: string, tagName: string): Promise<void> {
+  const canonical = canonicalGithubReleaseTagUrl(url, repo, tagName);
+  if (!canonical) {
+    log.error('[Updates] Refusing to open a non-release URL');
+    return;
+  }
   try {
-    const validated = validateExternalURL(url);
+    const validated = validateExternalURL(canonical);
     await openExternal(validated);
   } catch (err: unknown) {
-    log.error('[Updates] Failed to open release URL:', err);
+    log.error('[Updates] Failed to open release URL:', sanitizeLogError(err));
   }
+}
+
+function canRunUpdateFetch(): boolean {
+  return app.isPackaged || process.env['TESTING'] === 'true';
 }
 
 /**
@@ -190,10 +289,29 @@ async function openReleasePage(url: string): Promise<void> {
  * Always surfaces the native update dialog for terminal outcomes.
  */
 export async function checkForUpdatesManual(): Promise<void> {
-  if (manualGate) {
+  // Another manual session stays a no-op. A background session is left untouched;
+  // this click runs only after that session releases the gate.
+  if (updateSessionGate && sessionOwner === 'manual') {
     return;
   }
-  manualGate = true;
+  if (updateSessionGate && sessionOwner === 'background') {
+    if (manualWaiter) {
+      return;
+    }
+    const generation = manualWaitGeneration;
+    await new Promise<void>((resolve) => {
+      manualWaiter = resolve;
+    });
+    if (generation !== manualWaitGeneration) {
+      return;
+    }
+    manualWaiter = null;
+  }
+  if (backgroundShutdown || updateSessionGate) {
+    return;
+  }
+  updateSessionGate = true;
+  sessionOwner = 'manual';
 
   try {
     beginUpdateDialogSession();
@@ -239,7 +357,7 @@ export async function checkForUpdatesManual(): Promise<void> {
     try {
       latest = await fetchLatestRelease(repo);
     } catch (err: unknown) {
-      log.error('[Updates] Manual check failed:', err);
+      log.error('[Updates] Manual check failed:', sanitizeLogError(err));
       if (isUpdateSessionDismissed()) return;
       await presentUpdateDialog({
         type: 'error',
@@ -281,20 +399,11 @@ export async function checkForUpdatesManual(): Promise<void> {
       return;
     }
 
-    const bodySnippet = (latest.body ?? '').trim().slice(0, 400);
-    const detail = [
-      `Installed: v${app.getVersion()}`,
-      `Latest: ${latest.tag_name}`,
-      bodySnippet.length > 0 ? `\n${bodySnippet}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
-
     const { response } = await presentUpdateDialog({
       type: 'info',
       title: 'GogChat Updates',
       message: 'New release available',
-      detail,
+      detail: releaseAvailableDetail(latest),
       buttons: ['Download', 'Later'],
       defaultId: 0,
       cancelId: 1,
@@ -302,41 +411,120 @@ export async function checkForUpdatesManual(): Promise<void> {
     });
 
     if (response === 0) {
-      await openReleasePage(latest.html_url);
+      await openReleasePage(latest.html_url, repo, latest.tag_name);
     }
   } finally {
-    manualGate = false;
+    releaseUpdateSession();
+  }
+}
+
+/**
+ * Scheduled update check. Silent unless a newer stable release exists:
+ * no checking, up-to-date, or error window, and no rejected promise.
+ */
+export async function runBackgroundUpdateCheck(): Promise<void> {
+  let acquired = false;
+  try {
+    if (!configGet('app.autoCheckForUpdates')) {
+      return;
+    }
+    if (!canRunUpdateFetch()) {
+      return;
+    }
+    if (shutdownBlocksUpdateUi()) {
+      return;
+    }
+    if (updateSessionGate) {
+      return;
+    }
+    updateSessionGate = true;
+    sessionOwner = 'background';
+    acquired = true;
+
+    const pkg = getPackageInfo();
+    const repo = githubRepoSlug(pkg.repository);
+    if (!repo) {
+      log.error('[Updates] Background check failed: repository metadata is missing');
+      return;
+    }
+
+    let latest: StableGithubRelease | null;
+    try {
+      latest = await fetchLatestRelease(repo);
+    } catch (err: unknown) {
+      log.error('[Updates] Background check failed:', sanitizeLogError(err));
+      return;
+    }
+
+    if (!configGet('app.autoCheckForUpdates') || shutdownBlocksUpdateUi()) {
+      return;
+    }
+    if (!latest) {
+      log.error('[Updates] Background check failed: no stable release');
+      return;
+    }
+    if (!isVersionNewer(latest.tag_name, app.getVersion())) {
+      return;
+    }
+
+    beginUpdateDialogSession();
+    const { response } = await presentUpdateDialog({
+      type: 'info',
+      title: 'GogChat Updates',
+      message: 'New release available',
+      detail: releaseAvailableDetail(latest),
+      buttons: ['Download', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      phase: 'result',
+    });
+
+    if (shutdownBlocksUpdateUi()) {
+      return;
+    }
+    if (response === 0) {
+      await openReleasePage(latest.html_url, repo, latest.tag_name);
+    }
+  } catch (err: unknown) {
+    log.error('[Updates] Background check failed:', sanitizeLogError(err));
+  } finally {
+    if (acquired) {
+      releaseUpdateSession();
+    }
   }
 }
 
 export default () => {
+  if (initialCheck) cancelTrackedTimeout(initialCheck);
   if (interval) cancelTrackedInterval(interval);
 
-  const shouldCheckForUpdates = () => {
-    return configGet('app.autoCheckForUpdates');
+  const runScheduledBackgroundCheck = (): void => {
+    void runBackgroundUpdateCheck();
   };
 
-  // Runs once at startup (silent system path via electron-update-notifier)
-  createTrackedTimeout(
-    () => {
-      if (shouldCheckForUpdates()) {
-        setUpdateNotification();
-      }
-    },
+  initialCheck = createTrackedTimeout(
+    runScheduledBackgroundCheck,
     5000,
     'appUpdates-initial-check'
   );
 
   interval = createTrackedInterval(
-    () => {
-      if (shouldCheckForUpdates()) {
-        void checkForUpdates();
-      }
-    },
+    runScheduledBackgroundCheck,
     1000 * 60 * 60 * 24,
     'appUpdates-daily-check'
   );
 };
+
+// Untracked on purpose: tracked removal runs before an in-flight check can see the latch.
+if (typeof app.on === 'function') {
+  app.on('before-quit', () => {
+    backgroundShutdown = true;
+  });
+}
+
+registerCleanupTask('appUpdates-suppress-prompts', () => {
+  backgroundShutdown = true;
+});
 
 registerMenuAction('checkForUpdates', {
   label: 'Check For Updates',
@@ -345,9 +533,23 @@ registerMenuAction('checkForUpdates', {
   },
 });
 
-if (process.env['TESTING'] === 'true') {
-  const testGlobal = asType<
-    typeof globalThis & { __gogchatCheckForUpdatesManual?: typeof checkForUpdatesManual }
-  >(globalThis);
+type UpdateTestGlobal = typeof globalThis & {
+  __gogchatCheckForUpdatesManual?: typeof checkForUpdatesManual;
+  __gogchatRunBackgroundUpdateCheck?: typeof runBackgroundUpdateCheck;
+  __gogchatSetAutoCheckForUpdates?: (enabled: boolean) => void;
+};
+
+/** Playwright seam. Installed only when `TESTING=true`. */
+export function installUpdateTestHooks(): void {
+  if (process.env['TESTING'] !== 'true') {
+    return;
+  }
+  const testGlobal = asType<UpdateTestGlobal>(globalThis);
   testGlobal.__gogchatCheckForUpdatesManual = checkForUpdatesManual;
+  testGlobal.__gogchatRunBackgroundUpdateCheck = runBackgroundUpdateCheck;
+  testGlobal.__gogchatSetAutoCheckForUpdates = (enabled: boolean): void => {
+    configSet('app.autoCheckForUpdates', enabled);
+  };
 }
+
+installUpdateTestHooks();
