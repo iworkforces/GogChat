@@ -70,6 +70,9 @@ const mocks = vi.hoisted(() => {
     initializeStore: vi.fn(async () => {
       order.push('store-init');
     }),
+    prepareAccountWindows: vi.fn(async () => {
+      order.push('prepare-account-windows');
+    }),
     getAccountWindowManager: vi.fn(() => accountWindowManager),
     createAccountWindow: vi.fn(() => {
       order.push('create-account-0');
@@ -128,6 +131,9 @@ vi.mock('./registerGlobalCleanups.js', () => ({
 }));
 vi.mock('../config.js', () => ({
   initializeStore: mocks.initializeStore,
+}));
+vi.mock('../utils/account/accountWindowPersistenceBridge.js', () => ({
+  prepareAccountWindows: mocks.prepareAccountWindows,
 }));
 vi.mock('../utils/account/cacheWarmer.js', () => ({
   warmInitialIcons: mocks.warmInitialIcons,
@@ -225,6 +231,9 @@ describe('registerAppReady characterization', () => {
     mocks.initializeStore.mockImplementation(async () => {
       mocks.order.push('store-init');
     });
+    mocks.prepareAccountWindows.mockImplementation(async () => {
+      mocks.order.push('prepare-account-windows');
+    });
     mocks.runDeferredPhase.mockImplementation(async () => {
       mocks.order.push('deferred-phase');
     });
@@ -251,6 +260,7 @@ describe('registerAppReady characterization', () => {
     const cleanups = mocks.order.indexOf('global-cleanups');
     const critical = mocks.order.indexOf('phase:critical');
     const store = mocks.order.indexOf('store-init');
+    const prepare = mocks.order.indexOf('prepare-account-windows');
     const firstPreconnect = mocks.order.findIndex((item) => item.startsWith('preconnect:'));
     const account0 = mocks.order.indexOf('create-account-0');
     const ui = mocks.order.indexOf('phase:ui');
@@ -259,7 +269,8 @@ describe('registerAppReady characterization', () => {
     expect(cleanups).toBeGreaterThanOrEqual(0);
     expect(Math.max(security, cleanups)).toBeLessThan(critical);
     expect(Math.max(security, cleanups)).toBeLessThan(store);
-    expect(Math.max(critical, store)).toBeLessThan(firstPreconnect);
+    expect(Math.max(critical, store)).toBeLessThan(prepare);
+    expect(prepare).toBeLessThan(firstPreconnect);
     expect(firstPreconnect).toBeLessThan(account0);
     expect(account0).toBeLessThan(ui);
 

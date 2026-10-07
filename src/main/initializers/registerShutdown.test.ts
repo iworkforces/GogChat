@@ -30,7 +30,9 @@ const mocks = vi.hoisted(() => {
     destroyAccountWindowManager: vi.fn(),
     peekAccountWindowManager: vi.fn(() => ({
       listAccountIndices: () => [0, 1],
+      saveAccountWindowState: vi.fn(),
     })),
+    flushAccountWindowPersistence: vi.fn(async () => undefined),
     destroyAllSingletons: vi.fn(),
     logShutdownDiagnostics: vi.fn().mockResolvedValue(undefined),
   };
@@ -50,6 +52,9 @@ vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
 vi.mock('../utils/account/accountWindowManager.js', () => ({
   destroyAccountWindowManager: mocks.destroyAccountWindowManager,
   peekAccountWindowManager: mocks.peekAccountWindowManager,
+}));
+vi.mock('../utils/account/accountWindowPersistenceBridge.js', () => ({
+  flushAccountWindowPersistence: mocks.flushAccountWindowPersistence,
 }));
 vi.mock('./singletonDestroyers.js', () => ({ destroyAllSingletons: mocks.destroyAllSingletons }));
 vi.mock('./shutdownDiagnostics.js', () => ({
@@ -119,6 +124,12 @@ describe('registerShutdownHandler', () => {
     mocks.logShutdownDiagnostics.mockResolvedValue(undefined);
     mocks.app.exit.mockImplementation(() => undefined);
     mocks.app.quit.mockImplementation(() => undefined);
+    mocks.flushAccountWindowPersistence.mockReset();
+    mocks.flushAccountWindowPersistence.mockResolvedValue(undefined);
+    mocks.peekAccountWindowManager.mockImplementation(() => ({
+      listAccountIndices: () => [0, 1],
+      saveAccountWindowState: vi.fn(),
+    }));
   });
 
   it('runs global cleanup in the ordered shutdown sequence', async () => {
@@ -138,7 +149,31 @@ describe('registerShutdownHandler', () => {
     });
     expect(order).toEqual(['features', 'global', 'accounts', 'diagnostics', 'singletons', 'exit']);
     expect(mocks.peekAccountWindowManager).toHaveBeenCalled();
+    expect(mocks.flushAccountWindowPersistence).toHaveBeenCalled();
     expect(mocks.logShutdownDiagnostics).toHaveBeenCalledWith({ accountIndices: [0, 1] });
+  });
+
+  it('saves every live and dehydrated account, flushes, then destroys', async () => {
+    const steps: string[] = [];
+    mocks.peekAccountWindowManager.mockReturnValueOnce({
+      listAccountIndices: () => [0, 2],
+      saveAccountWindowState: (accountIndex: number) => {
+        steps.push(`save:${accountIndex}`);
+      },
+    });
+    mocks.flushAccountWindowPersistence.mockImplementationOnce(async () => {
+      steps.push('flush');
+    });
+    mocks.destroyAccountWindowManager.mockImplementationOnce(() => {
+      steps.push('destroy');
+    });
+
+    registerShutdownHandler();
+    getBeforeQuitListener()({ preventDefault: vi.fn() });
+    await waitForShutdown();
+
+    expect(steps).toEqual(['save:0', 'save:2', 'flush', 'destroy']);
+    expect(mocks.logShutdownDiagnostics).toHaveBeenCalledWith({ accountIndices: [0, 2] });
   });
 
   it('closes startup synchronously before scheduling cleanup and shares the stage/overall budget', async () => {
