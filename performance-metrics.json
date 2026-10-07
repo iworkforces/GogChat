@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "units": {
+    "memory": "MB",
+    "time": "ms"
+  },
+  "capture": {
+    "complete": true,
+    "valid": true,
+    "requiredMarkers": [
+      "app-start",
+      "app-ready",
+      "account-0-ready",
+      "account-0-content-loaded",
+      "features-loaded",
+      "all-features-loaded"
+    ],
+    "missingMarkers": [],
+    "rendererSampleCount": 1
+  },
+  "startupTime": 7792,
+  "markers": {
+    "app-start": 2,
+    "app-ready": 36,
+    "store-init-start": 40,
+    "store-init-end": 115,
+    "account-manager-init": 132,
+    "chat-preconnect": 137,
+    "window-created": 194,
+    "account-0-ready": 194,
+    "features-loaded": 195,
+    "icons-cached": 196,
+    "icons-soon-deferred-cached": 197,
+    "deferred-features-start": 197,
+    "deferred:batch:1:start": 197,
+    "deferred:batch:1:end": 229,
+    "deferred:batch:2:start": 229,
+    "deferred:batch:2:end": 236,
+    "deferred:batch:3:start": 236,
+    "deferred:batch:3:end": 251,
+    "deferred:batch:4:start": 251,
+    "deferred:batch:4:end": 269,
+    "all-features-loaded": 269,
+    "account-0-content-loaded": 7789
+  },
+  "memorySnapshots": [
+    {
+      "timestamp": 0,
+      "heapUsed": 7.07,
+      "heapTotal": 10.95,
+      "external": 3.03,
+      "rss": 100.16
+    },
+    {
+      "timestamp": 269,
+      "heapUsed": 10.58,
+      "heapTotal": 18.95,
+      "external": 3.35,
+      "rss": 173
+    }
+  ],
+  "rendererSnapshots": [
+    {
+      "timestamp": 7791,
+      "pid": 58612,
+      "type": "gpu",
+      "memory": {
+        "residentSet": 87.83,
+        "peakResidentSet": 97.17,
+        "private": null,
+        "privateSource": "unavailable"
+      },
+      "cpuPercent": 0,
+      "creationTime": 1791389717185.084
+    },
+    {
+      "timestamp": 7791,
+      "pid": 58613,
+      "type": "utility",
+      "memory": {
+        "residentSet": 61.08,
+        "peakResidentSet": 61.31,
+        "private": null,
+        "privateSource": "unavailable"
+      },
+      "cpuPercent": 0,
+      "creationTime": 1791389717186.225
+    },
+    {
+      "timestamp": 7791,
+      "pid": 58615,
+      "type": "renderer",
+      "memory": {
+        "residentSet": 239.53,
+        "peakResidentSet": 239.53,
+        "private": null,
+        "privateSource": "unavailable"
+      },
+      "cpuPercent": 0,
+      "creationTime": 1791389717366.279,
+      "accountIndex": 0,
+      "backend": "browser-window",
+      "webContentsId": 1
+    }
+  ],
+  "targetMet": false,
+  "warnings": [
+    "Marker 'account-0-content-loaded' at 7789ms EXCEEDS target threshold (3000ms)"
+  ],
+  "timestamp": "2026-10-07T16:15:24.968Z",
+  "appVersion": "4.2.0",
+  "ipcLatencySamples": [
+    {
+      "timestamp": 2599,
+      "channel": "faviconChanged",
+      "durationMs": 1.3484579999999369,
+      "accountIndex": 0,
+      "kind": "fast"
+    },
+    {
+      "timestamp": 2602,
+      "channel": "unreadCount",
+      "durationMs": 0.3497499999998581,
+      "accountIndex": 0,
+      "kind": "fast"
+    }
+  ],
+  "aggregation": {
+    "strategy": "single",
+    "runs": 1,
+    "successfulRuns": 1,
+    "invalidRuns": 0,
+    "complete": true
+  }
+}
