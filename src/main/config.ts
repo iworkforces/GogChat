@@ -20,14 +20,22 @@ let storeInstance: Store<StoreType> | CachedStore<StoreType> | null = null;
  * Now uses static import with ESM
  *
  * Migration strategy:
+ * - recoverRekey repairs a crashed rekey before the first store opens.
  * - If SafeStorage is available but the key file is missing while config exists,
  *   migrate from the legacy deterministic key to SafeStorage.
- * - rekeyConfigStore snapshots the data, moves the legacy file aside, then
- *   reopens the store with the new key. It is loaded on demand.
+ * - rekeyConfigStore writes the new ciphertext beside the live file, then
+ *   swaps it in. The module is loaded on demand.
  */
 export async function initializeStore(): Promise<Store<StoreType> | CachedStore<StoreType>> {
   if (storeInstance) {
     return storeInstance;
+  }
+
+  const { recoverRekey, rekeyConfigStore } = await import('./utils/config/rekeyConfigStore.js');
+  try {
+    recoverRekey();
+  } catch (error: unknown) {
+    log.error('[Config] Failed to restore legacy config:', error);
   }
 
   // Get or create encryption key (SafeStorage-backed or legacy)
@@ -46,8 +54,7 @@ export async function initializeStore(): Promise<Store<StoreType> | CachedStore<
   // case and a new random key would corrupt the data).
   if (migrationPending) {
     try {
-      const { rekeyConfigStore } = await import('./utils/config/rekeyConfigStore.js');
-      const rekeyed = await rekeyConfigStore(store);
+      const rekeyed = rekeyConfigStore(store);
       if (rekeyed) {
         store = rekeyed;
       }
