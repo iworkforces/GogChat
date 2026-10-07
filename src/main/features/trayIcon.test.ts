@@ -55,9 +55,20 @@ vi.mock('electron-log', () => ({
   default: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+const exitMocks = vi.hoisted(() => ({
+  exitAppAfterSavingWindows: vi.fn(async () => {
+    const { app } = await import('electron');
+    app.exit();
+  }),
+}));
+
+vi.mock('../utils/account/exitAfterAccountWindows.js', () => ({
+  exitAppAfterSavingWindows: (...args: unknown[]) => exitMocks.exitAppAfterSavingWindows(...args),
+}));
+
 import createTrayIcon, { cleanupTrayIcon } from './trayIcon';
 import type { BrowserWindow } from 'electron';
-import { Menu } from 'electron';
+import { Menu, app } from 'electron';
 
 /**
  * Minimal window interface required by createTrayIcon
@@ -116,6 +127,21 @@ describe('trayIcon', () => {
     const tray = getLastTrayInstance()!;
     expect(Menu.buildFromTemplate).toHaveBeenCalled();
     expect(tray.setContextMenu).toHaveBeenCalled();
+  });
+
+  it('Quit saves open windows and then exits', async () => {
+    const window = makeFakeWindow();
+    createTrayIcon(window as BrowserWindow);
+
+    const template = vi.mocked(Menu.buildFromTemplate).mock.calls[0]?.[0] as Array<{
+      label?: string;
+      click?: () => void | Promise<void>;
+    }>;
+    const quit = template?.find((item) => item.label === 'Quit');
+    quit?.click?.();
+    await exitMocks.exitAppAfterSavingWindows.mock.results[0]?.value;
+    expect(exitMocks.exitAppAfterSavingWindows).toHaveBeenCalledOnce();
+    expect(app.exit).toHaveBeenCalledOnce();
   });
 
   it('About menu item invokes registered aboutPanel handler', () => {

@@ -161,15 +161,25 @@ describe('registerShutdownHandler', () => {
         steps.push(`save:${accountIndex}`);
       },
     });
-    mocks.flushAccountWindowPersistence.mockImplementationOnce(async () => {
-      steps.push('flush');
-    });
+    let releaseFlush: (() => void) | undefined;
+    mocks.flushAccountWindowPersistence.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFlush = (): void => {
+            steps.push('flush');
+            resolve();
+          };
+        })
+    );
     mocks.destroyAccountWindowManager.mockImplementationOnce(() => {
       steps.push('destroy');
     });
 
     registerShutdownHandler();
     getBeforeQuitListener()({ preventDefault: vi.fn() });
+    await vi.waitFor(() => expect(releaseFlush).toBeTypeOf('function'));
+    expect(steps).toEqual(['save:0', 'save:2']);
+    releaseFlush?.();
     await waitForShutdown();
 
     expect(steps).toEqual(['save:0', 'save:2', 'flush', 'destroy']);
