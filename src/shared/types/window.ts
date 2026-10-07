@@ -38,6 +38,8 @@ export interface AccountWindowBounds {
 export interface AccountWindowState {
   bounds: AccountWindowBounds;
   isMaximized: boolean;
+  /** Set only while macOS fullscreen is active. Omitted when false. */
+  isFullScreen?: boolean;
 }
 
 /**

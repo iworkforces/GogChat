@@ -16,6 +16,7 @@ import type { AccountWindowState } from '../../../shared/types/window.js';
 interface CapturedAccountWindow {
   bounds: { x: number; y: number; width: number; height: number };
   isMaximized: boolean;
+  isFullScreen?: boolean;
 }
 
 /** Short keys match `accountWindowApi()` so this file does not repeat export names. */

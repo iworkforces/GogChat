@@ -68,6 +68,21 @@ interface DehydratedSnapshot {
   url: string;
   bounds: { x: number; y: number; width: number; height: number };
   isMaximized: boolean;
+  isFullScreen?: boolean;
+}
+
+/** Copy bounds and maximized state. Fullscreen is stored only while it is on. */
+function presentationState(captured: {
+  bounds: { x: number; y: number; width: number; height: number };
+  isMaximized: boolean;
+  isFullScreen?: boolean;
+}): AccountWindowState {
+  const state: AccountWindowState = {
+    bounds: { ...captured.bounds },
+    isMaximized: captured.isMaximized,
+  };
+  if (captured.isFullScreen === true) state.isFullScreen = true;
+  return state;
 }
 
 /** Re-export so tests can await the shared write queue from this module. */
@@ -546,12 +561,11 @@ export class AccountWindowManager implements IAccountWindowManager {
     const live = this.getAccountWindow(accountIndex);
     let state: AccountWindowState;
     if (live && !live.isDestroyed()) {
-      const captured = captureAccountWindowSnapshot(live);
-      state = { bounds: captured.bounds, isMaximized: captured.isMaximized };
+      state = presentationState(captureAccountWindowSnapshot(live));
     } else {
       const parked = this.dehydratedAccounts.get(accountIndex);
       if (!parked) return;
-      state = { bounds: { ...parked.bounds }, isMaximized: parked.isMaximized };
+      state = presentationState(parked);
     }
     submitAccountWindowState(accountIndex, state);
     log.debug(`[AccountWindowManager] Saved state for account ${accountIndex}`);
@@ -596,6 +610,7 @@ export class AccountWindowManager implements IAccountWindowManager {
       url: window.webContents.getURL(),
       bounds: captured.bounds,
       isMaximized: captured.isMaximized,
+      ...(captured.isFullScreen === true ? { isFullScreen: true } : {}),
     };
     this.dehydratedAccounts.set(accountIndex, snapshot);
     this.cancelDehydrate(accountIndex);
@@ -640,7 +655,9 @@ export class AccountWindowManager implements IAccountWindowManager {
       // Restore presentation state. setBounds first, then maximize, so that the
       // pre-maximize bounds are remembered for later unmaximize.
       window.setBounds(snapshot.bounds);
-      if (snapshot.isMaximized) {
+      if (snapshot.isFullScreen === true && typeof window.setFullScreen === 'function') {
+        window.setFullScreen(true);
+      } else if (snapshot.isMaximized) {
         window.maximize();
       }
       // Navigation is owned solely by the factory (windowWrapper calls loadURL

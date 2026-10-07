@@ -13,6 +13,7 @@
  * @module accountWindowsStore
  */
 
+import * as electron from 'electron';
 import type { BrowserWindow } from 'electron';
 import log from 'electron-log';
 import { configGet, configSet } from '../../config.js';
@@ -26,6 +27,8 @@ import type { AccountWindowState, AccountWindowsMap } from '../../../shared/type
 /** Matches `configSchema.ts` window / accountWindows defaults. */
 const FACTORY_WIDTH = 800;
 const FACTORY_HEIGHT = 600;
+/** A window must overlap a display by this much to count as on-screen. */
+const MIN_VISIBLE_PX = 48;
 
 interface Throttle {
   invoke: () => void;
@@ -33,15 +36,20 @@ interface Throttle {
 }
 
 interface WatchedWindow {
+  accountIndex: AccountIndex;
   throttle: Throttle;
   onGeometry: () => void;
   onMaximize: () => void;
   onUnmaximize: () => void;
+  onClose: () => void;
+  onEnterFullScreen: () => void;
+  onLeaveFullScreen: () => void;
 }
 
 export interface CapturedAccountWindow {
   bounds: { x: number; y: number; width: number; height: number };
   isMaximized: boolean;
+  isFullScreen?: boolean;
 }
 
 let accountWindowsWriteQueue: Promise<void> = Promise.resolve();
@@ -84,7 +92,7 @@ export function factoryAccountWindowState(): AccountWindowState {
 }
 
 function copyState(state: AccountWindowState): AccountWindowState {
-  return {
+  const next: AccountWindowState = {
     bounds: {
       x: state.bounds.x,
       y: state.bounds.y,
@@ -93,6 +101,9 @@ function copyState(state: AccountWindowState): AccountWindowState {
     },
     isMaximized: state.isMaximized,
   };
+  // Omit a false flag so older saves stay identical. A non-boolean is dropped.
+  if (state.isFullScreen === true) next.isFullScreen = true;
+  return next;
 }
 
 function currentMap(): AccountWindowsMap {
@@ -176,6 +187,9 @@ export function readNormalBounds(window: BrowserWindow): AccountWindowState | nu
       bounds: { x: raw.x, y: raw.y, width: raw.width, height: raw.height },
       isMaximized: window.isMaximized() === true,
     };
+    if (typeof window.isFullScreen === 'function' && window.isFullScreen()) {
+      state.isFullScreen = true;
+    }
     return isAccountWindowState(state) ? state : null;
   } catch (error: unknown) {
     log.error('[AccountWindows] Failed to persist account window state:', sanitizeLogError(error));
@@ -191,6 +205,7 @@ export function captureAccountWindowSnapshot(window: BrowserWindow): CapturedAcc
     return {
       bounds: { x, y, width: captured.bounds.width, height: captured.bounds.height },
       isMaximized: captured.isMaximized,
+      ...(captured.isFullScreen === true ? { isFullScreen: true } : {}),
     };
   }
   let raw: { x: number; y: number; width: number; height: number } = {
@@ -204,7 +219,7 @@ export function captureAccountWindowSnapshot(window: BrowserWindow): CapturedAcc
   } catch (error: unknown) {
     log.error('[AccountWindows] Failed to persist account window state:', sanitizeLogError(error));
   }
-  return {
+  const fallback: CapturedAccountWindow = {
     bounds: {
       x: isFiniteNumber(raw.x) ? raw.x : 0,
       y: isFiniteNumber(raw.y) ? raw.y : 0,
@@ -213,6 +228,10 @@ export function captureAccountWindowSnapshot(window: BrowserWindow): CapturedAcc
     },
     isMaximized: window.isMaximized() === true,
   };
+  if (typeof window.isFullScreen === 'function' && window.isFullScreen()) {
+    fallback.isFullScreen = true;
+  }
+  return fallback;
 }
 
 export function persistAccountWindowState(
@@ -242,11 +261,58 @@ export function migrateLegacyWindowToAccountZero(): Promise<void> {
   });
 }
 
+interface WorkArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function overlapsDisplay(bounds: WorkArea, area: WorkArea): boolean {
+  const overlapWidth =
+    Math.min(bounds.x + bounds.width, area.x + area.width) - Math.max(bounds.x, area.x);
+  const overlapHeight =
+    Math.min(bounds.y + bounds.height, area.y + area.height) - Math.max(bounds.y, area.y);
+  return overlapWidth >= MIN_VISIBLE_PX && overlapHeight >= MIN_VISIBLE_PX;
+}
+
 /**
- * Place `window` on its saved normal bounds, then maximize.
+ * Keep bounds that meet a display. Otherwise center them on the primary
+ * work area, shrinking only when they are larger than that area.
+ * A missing `screen` (unit mocks) leaves the saved rect unchanged.
+ */
+function clampOntoADisplay(bounds: WorkArea): WorkArea {
+  try {
+    const screen = electron.screen;
+    if (typeof screen?.getAllDisplays !== 'function') return bounds;
+    const displays = screen.getAllDisplays();
+    if (!Array.isArray(displays) || displays.length === 0) return bounds;
+    for (const display of displays) {
+      if (display.workArea && overlapsDisplay(bounds, display.workArea)) return bounds;
+    }
+    const area =
+      typeof screen.getPrimaryDisplay === 'function' ? screen.getPrimaryDisplay()?.workArea : null;
+    if (!area || area.width < 1 || area.height < 1) return bounds;
+    const width = Math.min(bounds.width, area.width);
+    const height = Math.min(bounds.height, area.height);
+    return {
+      x: area.x + Math.max(0, Math.round((area.width - width) / 2)),
+      y: area.y + Math.max(0, Math.round((area.height - height) / 2)),
+      width,
+      height,
+    };
+  } catch (error: unknown) {
+    log.error('[AccountWindows] Failed to place window on a display:', sanitizeLogError(error));
+    return bounds;
+  }
+}
+
+/**
+ * Place `window` on its saved normal bounds, then maximize or fullscreen.
  * `setBounds` before `maximize` is what makes a later unmaximize return
  * to those normal bounds. Null coordinates center at the saved size.
- * No-op when the account has no saved entry. Call before the first show.
+ * Fullscreen wins over maximize. No-op when the account has no saved entry.
+ * Call before the first show.
  */
 export function applyAccountWindowState(window: BrowserWindow, accountIndex: AccountIndex): void {
   if (window.isDestroyed()) return;
@@ -259,7 +325,11 @@ export function applyAccountWindowState(window: BrowserWindow, accountIndex: Acc
     window.setSize(width, height);
     window.center();
   } else {
-    window.setBounds({ x: Math.round(x), y: Math.round(y), width, height });
+    window.setBounds(clampOntoADisplay({ x: Math.round(x), y: Math.round(y), width, height }));
+  }
+  if (state.isFullScreen === true && typeof window.setFullScreen === 'function') {
+    window.setFullScreen(true);
+    return;
   }
   if (state.isMaximized) {
     window.maximize();
@@ -323,11 +393,44 @@ export function watchAccountWindow(window: BrowserWindow, accountIndex: AccountI
     throttle.cancel();
     saveWatchedWindow(window, accountIndex);
   };
+  // `close` still has a live window. `closed` is too late: unwatch cancels the timer.
+  const onClose = (): void => {
+    throttle.cancel();
+    saveWatchedWindow(window, accountIndex);
+  };
+  const onEnterFullScreen = (): void => {
+    throttle.cancel();
+    saveWatchedWindow(window, accountIndex);
+  };
+  const onLeaveFullScreen = (): void => {
+    throttle.cancel();
+    saveWatchedWindow(window, accountIndex);
+  };
   window.on('resize', onGeometry);
   window.on('move', onGeometry);
   window.on('maximize', onMaximize);
   window.on('unmaximize', onUnmaximize);
-  watchedWindows.set(window, { throttle, onGeometry, onMaximize, onUnmaximize });
+  window.on('close', onClose);
+  window.on('enter-full-screen', onEnterFullScreen);
+  window.on('leave-full-screen', onLeaveFullScreen);
+  watchedWindows.set(window, {
+    accountIndex,
+    throttle,
+    onGeometry,
+    onMaximize,
+    onUnmaximize,
+    onClose,
+    onEnterFullScreen,
+    onLeaveFullScreen,
+  });
+}
+
+/** Read every watched window now. A pending move/resize timer is cancelled first. */
+export function captureWatchedAccountWindows(): void {
+  for (const [window, watched] of watchedWindows) {
+    watched.throttle.cancel();
+    saveWatchedWindow(window, watched.accountIndex);
+  }
 }
 
 export function unwatchAccountWindow(window: BrowserWindow): void {
@@ -341,6 +444,9 @@ export function unwatchAccountWindow(window: BrowserWindow): void {
     window.removeListener('move', watched.onGeometry);
     window.removeListener('maximize', watched.onMaximize);
     window.removeListener('unmaximize', watched.onUnmaximize);
+    window.removeListener('close', watched.onClose);
+    window.removeListener('enter-full-screen', watched.onEnterFullScreen);
+    window.removeListener('leave-full-screen', watched.onLeaveFullScreen);
   } catch (error: unknown) {
     // Later watched windows still detach when this one cannot answer isDestroyed.
     log.error(
