@@ -89,6 +89,9 @@ const h = vi.hoisted(() => {
     public getBounds: ReturnType<typeof vi.fn>;
     public getNormalBounds?: () => { x: number; y: number; width: number; height: number };
     public isMaximized: ReturnType<typeof vi.fn>;
+    public fullScreen = false;
+    public isFullScreen: ReturnType<typeof vi.fn>;
+    public setFullScreen: ReturnType<typeof vi.fn>;
     public isMinimized: ReturnType<typeof vi.fn>;
     public isDestroyed: ReturnType<typeof vi.fn>;
     public loadURL: ReturnType<typeof vi.fn>;
@@ -129,6 +132,10 @@ const h = vi.hoisted(() => {
       this.center = vi.fn();
       this.getBounds = vi.fn(() => ({ ...this.bounds }));
       this.isMaximized = vi.fn((): boolean => this.maximized);
+      this.isFullScreen = vi.fn((): boolean => this.fullScreen);
+      this.setFullScreen = vi.fn((value: boolean): void => {
+        this.fullScreen = value;
+      });
       this.isMinimized = vi.fn((): boolean => this.minimized);
       this.isDestroyed = vi.fn((): boolean => this.destroyed);
       this.isVisible = vi.fn((): boolean => this.visible && !this.destroyed);
@@ -1093,6 +1100,22 @@ describe('AccountWindowManager — dehydrate / hydrate', () => {
     m.dehydrateAccount(asAccountIndex(1));
     const w2 = m.hydrateAccount(asAccountIndex(1));
     const w2Mock = w2 as unknown as MockBWInstance;
+    expect(w2Mock.maximize).not.toHaveBeenCalled();
+    expect(w2Mock.setFullScreen).not.toHaveBeenCalled();
+  });
+
+  it('hydrateAccount restores fullscreen and does not also maximize', () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    const w = m.createAccountWindow('https://hello/', asAccountIndex(1));
+    const wMock = w as unknown as MockBWInstance;
+    wMock.fullScreen = true;
+    wMock.maximized = false;
+
+    m.dehydrateAccount(asAccountIndex(1));
+    const w2 = m.hydrateAccount(asAccountIndex(1));
+    const w2Mock = w2 as unknown as MockBWInstance;
+    expect(w2Mock.setFullScreen).toHaveBeenCalledWith(true);
     expect(w2Mock.maximize).not.toHaveBeenCalled();
   });
 });

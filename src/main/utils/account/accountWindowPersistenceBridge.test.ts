@@ -11,6 +11,13 @@ const h = vi.hoisted(() => ({
   store: {} as Record<string, unknown>,
 }));
 
+vi.mock('electron', () => ({
+  screen: {
+    getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }],
+    getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }),
+  },
+}));
+
 vi.mock('electron-log', () => ({
   default: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));

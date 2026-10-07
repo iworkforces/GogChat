@@ -10,6 +10,22 @@ const h = vi.hoisted(() => ({
   store: {} as Record<string, unknown>,
 }));
 
+const displays = vi.hoisted(() => ({
+  all: [{ workArea: { x: 0, y: 0, width: 1440, height: 900 } }],
+  primary: { workArea: { x: 0, y: 0, width: 1440, height: 900 } },
+  fail: false,
+}));
+
+vi.mock('electron', () => ({
+  screen: {
+    getAllDisplays: () => {
+      if (displays.fail) throw new Error('no display');
+      return displays.all;
+    },
+    getPrimaryDisplay: () => displays.primary,
+  },
+}));
+
 vi.mock('electron-log', () => ({
   default: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
@@ -31,6 +47,7 @@ import { schema } from '../config/configSchema.js';
 import {
   applyAccountWindowState,
   captureAccountWindowSnapshot,
+  captureWatchedAccountWindows,
   detachAllAccountWindowListeners,
   factoryAccountWindowState,
   flushAccountWindowsWrites,
@@ -55,6 +72,9 @@ interface FakeWindow {
   maximize: ReturnType<typeof vi.fn>;
   getBounds: () => { x: number; y: number; width: number; height: number };
   isMaximized: () => boolean;
+  fullScreen: boolean;
+  isFullScreen: () => boolean;
+  setFullScreen: ReturnType<typeof vi.fn>;
   isDestroyed: () => boolean;
   emit: EventEmitter['emit'];
   on: EventEmitter['on'];
@@ -68,6 +88,11 @@ function fakeWindow(): FakeWindow {
     destroyed: false,
     bounds: { x: 10, y: 20, width: 800, height: 600 },
     maximized: false,
+    fullScreen: false,
+    isFullScreen: () => win.fullScreen,
+    setFullScreen: vi.fn((value: boolean) => {
+      win.fullScreen = value;
+    }),
     setBounds: vi.fn((bounds: { x: number; y: number; width: number; height: number }) => {
       win.bounds = { ...bounds };
     }),
@@ -94,6 +119,9 @@ function valid(x: number, y: number, width = 900, height = 700): AccountWindowSt
 }
 
 beforeEach(async () => {
+  displays.fail = false;
+  displays.all = [{ workArea: { x: 0, y: 0, width: 1440, height: 900 } }];
+  displays.primary = { workArea: { x: 0, y: 0, width: 1440, height: 900 } };
   for (const key of Object.keys(h.store)) delete h.store[key];
   vi.mocked(configSet).mockImplementation((key: string, value: unknown) => {
     h.store[key] = value;
@@ -376,6 +404,66 @@ describe('accountWindowsStore restore', () => {
       expect.objectContaining({ message: '[redacted]' })
     );
   });
+
+  it('restores fullscreen instead of maximize and drops a non-boolean flag', () => {
+    const win = fakeWindow();
+    h.store['accountWindows'] = {
+      0: {
+        bounds: { x: 20, y: 30, width: 880, height: 640 },
+        isMaximized: true,
+        isFullScreen: true,
+      },
+    };
+    applyAccountWindowState(asWindow(win), asAccountIndex(0));
+    expect(win.setBounds).toHaveBeenCalledWith({ x: 20, y: 30, width: 880, height: 640 });
+    expect(win.setFullScreen).toHaveBeenCalledWith(true);
+    expect(win.maximize).not.toHaveBeenCalled();
+
+    h.store['accountWindows'] = {
+      1: { bounds: { x: 20, y: 30, width: 880, height: 640 }, isMaximized: false, isFullScreen: 1 },
+    };
+    expect(readAccountWindowState(asAccountIndex(1))).toEqual({
+      bounds: { x: 20, y: 30, width: 880, height: 640 },
+      isMaximized: false,
+    });
+  });
+
+  it('moves a window that misses every display onto the primary work area', () => {
+    const win = fakeWindow();
+    h.store['accountWindows'] = {
+      0: { bounds: { x: 4000, y: 4000, width: 2000, height: 1200 }, isMaximized: false },
+    };
+    applyAccountWindowState(asWindow(win), asAccountIndex(0));
+    expect(win.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 1440, height: 900 });
+
+    const sliver = fakeWindow();
+    h.store['accountWindows'] = {
+      2: { bounds: { x: 1400, y: 0, width: 800, height: 600 }, isMaximized: false },
+    };
+    applyAccountWindowState(asWindow(sliver), asAccountIndex(2));
+    expect(sliver.setBounds).toHaveBeenCalledWith({ x: 320, y: 150, width: 800, height: 600 });
+
+    const visible = fakeWindow();
+    h.store['accountWindows'] = {
+      3: { bounds: { x: 1392, y: 0, width: 800, height: 600 }, isMaximized: false },
+    };
+    applyAccountWindowState(asWindow(visible), asAccountIndex(3));
+    expect(visible.setBounds).toHaveBeenCalledWith({ x: 1392, y: 0, width: 800, height: 600 });
+  });
+
+  it('keeps the saved rect when display lookup fails', () => {
+    displays.fail = true;
+    const win = fakeWindow();
+    h.store['accountWindows'] = {
+      0: { bounds: { x: 4000, y: 10, width: 800, height: 600 }, isMaximized: false },
+    };
+    applyAccountWindowState(asWindow(win), asAccountIndex(0));
+    expect(win.setBounds).toHaveBeenCalledWith({ x: 4000, y: 10, width: 800, height: 600 });
+    expect(log.error).toHaveBeenCalledWith(
+      '[AccountWindows] Failed to place window on a display:',
+      expect.objectContaining({ message: '[redacted]' })
+    );
+  });
 });
 
 describe('accountWindowsStore listeners', () => {
@@ -451,6 +539,73 @@ describe('accountWindowsStore listeners', () => {
     expect(other.listenerCount('move')).toBe(0);
     expect(other.listenerCount('maximize')).toBe(0);
     expect(other.listenerCount('unmaximize')).toBe(0);
+    expect(other.listenerCount('close')).toBe(0);
+    expect(other.listenerCount('enter-full-screen')).toBe(0);
+    expect(other.listenerCount('leave-full-screen')).toBe(0);
     unwatchAccountWindow(asWindow(other));
+  });
+
+  it('flushes the trailing move when the window closes and on fullscreen', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const win = fakeWindow();
+    watchAccountWindow(asWindow(win), asAccountIndex(4));
+    win.bounds = { x: 50, y: 60, width: 700, height: 500 };
+    win.emit('resize');
+    await flushAccountWindowsWrites();
+    vi.mocked(configSet).mockClear();
+    win.bounds = { x: 70, y: 60, width: 700, height: 500 };
+    win.emit('move');
+    expect(configSet).not.toHaveBeenCalled();
+    win.bounds = { x: 80, y: 90, width: 710, height: 510 };
+    win.emit('close');
+    await flushAccountWindowsWrites();
+    expect((h.store['accountWindows'] as Record<number, AccountWindowState>)[4]).toEqual({
+      bounds: { x: 80, y: 90, width: 710, height: 510 },
+      isMaximized: false,
+    });
+    expect(win.listenerCount('close')).toBe(1);
+    await vi.advanceTimersByTimeAsync(TIMING.WINDOW_STATE_SAVE);
+    await flushAccountWindowsWrites();
+    expect(vi.mocked(configSet)).toHaveBeenCalledTimes(1);
+
+    win.fullScreen = true;
+    win.emit('enter-full-screen');
+    await flushAccountWindowsWrites();
+    expect((h.store['accountWindows'] as Record<number, AccountWindowState>)[4]?.isFullScreen).toBe(
+      true
+    );
+
+    win.fullScreen = false;
+    win.emit('leave-full-screen');
+    await flushAccountWindowsWrites();
+    expect(
+      (h.store['accountWindows'] as Record<number, AccountWindowState>)[4]?.isFullScreen
+    ).toBeUndefined();
+  });
+
+  it('captures every watched window without waiting for the move timer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const first = fakeWindow();
+    const second = fakeWindow();
+    watchAccountWindow(asWindow(first), asAccountIndex(0));
+    watchAccountWindow(asWindow(second), asAccountIndex(2));
+    first.emit('resize');
+    second.emit('resize');
+    await flushAccountWindowsWrites();
+    vi.mocked(configSet).mockClear();
+    first.bounds = { x: 11, y: 12, width: 640, height: 480 };
+    second.bounds = { x: 21, y: 22, width: 650, height: 490 };
+    first.emit('move');
+    second.emit('move');
+    second.bounds = { x: 31, y: 32, width: 660, height: 500 };
+    captureWatchedAccountWindows();
+    await flushAccountWindowsWrites();
+    const stored = h.store['accountWindows'] as Record<number, AccountWindowState>;
+    expect(stored[0]?.bounds).toEqual({ x: 11, y: 12, width: 640, height: 480 });
+    expect(stored[2]?.bounds).toEqual({ x: 31, y: 32, width: 660, height: 500 });
+    const writes = vi.mocked(configSet).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(TIMING.WINDOW_STATE_SAVE);
+    await flushAccountWindowsWrites();
+    expect(vi.mocked(configSet).mock.calls.length).toBe(writes);
   });
 });

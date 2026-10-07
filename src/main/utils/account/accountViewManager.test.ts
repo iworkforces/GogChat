@@ -837,7 +837,7 @@ describe('AccountViewManager — saveAccountWindowState / getAccountWindowState'
     expect(m.getAccountWindowState(asAccountIndex(99))).toBeNull();
   });
 
-  it('restores only the host window and keeps a secondary entry', () => {
+  it('restores only the host window and keeps a secondary entry', async () => {
     h.mockStore['app'] = { autoCheckForUpdates: false };
     h.mockStore['accountWindows'] = {
       0: { bounds: { x: 15, y: 25, width: 1100, height: 760 }, isMaximized: true },
@@ -850,7 +850,19 @@ describe('AccountViewManager — saveAccountWindowState / getAccountWindowState'
     expect(host.setBounds.mock.invocationCallOrder[0]).toBeLessThan(
       host.maximize.mock.invocationCallOrder[0] ?? 0
     );
-    m.saveAccountWindowState(asAccountIndex(3));
+    host.bounds = { x: 40, y: 50, width: 1000, height: 700 };
+    host.maximized = false;
+    m.saveAccountWindowState(asAccountIndex(0));
+    await flushAccountWindowsWrites();
+    const stored = h.mockStore['accountWindows'] as Record<
+      number,
+      { bounds: { x: number }; isMaximized: boolean }
+    >;
+    expect(stored[0]?.bounds.x).toBe(40);
+    expect(stored[3]).toEqual({
+      bounds: { x: 300, y: 220, width: 640, height: 580 },
+      isMaximized: false,
+    });
     expect(m.getAccountWindowState(asAccountIndex(3))).toEqual({
       bounds: { x: 300, y: 220, width: 640, height: 580 },
       isMaximized: false,
