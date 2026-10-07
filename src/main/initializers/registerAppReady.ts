@@ -25,6 +25,7 @@ import {
 export { getMostRecentWindow };
 import { registerGlobalCleanups } from './registerGlobalCleanups.js';
 import { initializeStore } from '../config.js';
+import { prepareAccountWindows } from '../utils/account/accountWindowPersistenceBridge.js';
 import { createTrackedInterval } from '../utils/lifecycle/resourceCleanup.js';
 import environment from '../../environment.js';
 import { runPhase } from '../utils/lifecycle/featureRunner.js';
@@ -78,14 +79,13 @@ export function registerAppReady(options: AppReadyOptions): void {
     .whenReady()
     .then(async () => {
       if (!isStartupAdmissionOpen()) return;
-      perfMonitor.mark('app-ready', 'Electron app ready');
+      perfMonitor.mark('app-ready');
 
       // ===== INITIALIZE ERROR HANDLER =====
       try {
         initializeErrorHandler({
           gracefulShutdown: true,
         });
-        log.info('[Main] Centralized error handler initialized');
       } catch {
         log.error('[Main] Failed to initialize error handler');
       }
@@ -105,27 +105,32 @@ export function registerAppReady(options: AppReadyOptions): void {
           runPhase('critical', context),
           (async () => {
             if (!isStartupAdmissionOpen()) return;
-            perfMonitor.mark('store-init-start', 'Config store init started');
+            perfMonitor.mark('store-init-start');
             try {
               await initializeStore();
             } finally {
               if (isStartupAdmissionOpen()) {
-                perfMonitor.mark('store-init-end', 'Config store init completed');
+                perfMonitor.mark('store-init-end');
               }
             }
           })(),
         ]);
         if (!isStartupAdmissionOpen()) return;
-        log.info('[Main] Config store initialized');
       } catch (error: unknown) {
         log.error('[Main] Failed to initialize critical phase or store');
         throw error;
       }
 
+      // Copy legacy `window` into account 0 before any account window exists.
+      // Repeat calls are idempotent and do not run from a getter.
+      if (!isStartupAdmissionOpen()) return;
+      await prepareAccountWindows();
+      if (!isStartupAdmissionOpen()) return;
+
       // ===== ACCOUNT WINDOW MANAGER INITIALIZATION =====
       const accountWindowManager = getAccountWindowManager(windowFactory);
       if (!isStartupAdmissionOpen()) return;
-      perfMonitor.mark('account-manager-init', 'Account window manager initialized');
+      perfMonitor.mark('account-manager-init');
 
       // Preconnect on the network thread before BrowserWindow construction so
       // DNS + TCP + TLS handshake starts in parallel with renderer startup (~50-200 ms on cold).
@@ -146,10 +151,9 @@ export function registerAppReady(options: AppReadyOptions): void {
         // Preconnect Google Chat domains for parallel TLS handshake on cold start
         account0Session.preconnect({ url: 'https://chat.google.com', numSockets: 2 });
         account0Session.preconnect({ url: 'https://hangouts.google.com', numSockets: 1 });
-        perfMonitor.mark('chat-preconnect', 'Chat backend preconnect initiated');
+        perfMonitor.mark('chat-preconnect');
       } else {
-        log.info('[Main] Preconnect disabled via GOGCHAT_DISABLE_PRECONNECT=1');
-        perfMonitor.mark('chat-preconnect-skipped', 'Preconnect disabled by env toggle');
+        perfMonitor.mark('chat-preconnect-skipped');
       }
 
       // Create account-0 window (primary window)
@@ -157,7 +161,7 @@ export function registerAppReady(options: AppReadyOptions): void {
       createAccountWindow(environment.appUrl, asAccountIndex(0));
       if (!isStartupAdmissionOpen()) return;
       accountWindowManager.markAsBootstrap(asAccountIndex(0));
-      perfMonitor.mark('window-created', 'Main window created');
+      perfMonitor.mark('window-created');
 
       // Get the created window and use it as mainWindow for features
       // This preserves single-window behavior for account-0 while preparing for multi-account
@@ -167,7 +171,7 @@ export function registerAppReady(options: AppReadyOptions): void {
       // Update feature context with mainWindow and account manager
       context.mainWindow = mainWindow;
       context.accountWindowManager = accountWindowManager;
-      perfMonitor.mark('account-0-ready', 'Account-0 window ready');
+      perfMonitor.mark('account-0-ready');
 
       // Arm one-shot metrics finalization: export runs only after deferred
       // phase + document-load marker + immediate renderer sample. Document
@@ -183,7 +187,7 @@ export function registerAppReady(options: AppReadyOptions): void {
       if (account0Wc && !account0Wc.isDestroyed()) {
         account0Wc.once('did-finish-load', () => {
           if (!isStartupAdmissionOpen()) return;
-          perfMonitor.mark('account-0-content-loaded', 'Account-0 initial page load completed');
+          perfMonitor.mark('account-0-content-loaded');
           notifyDocumentLoadComplete();
         });
         // do not force-fail the capture on did-fail-load: Google auth and
@@ -202,17 +206,14 @@ export function registerAppReady(options: AppReadyOptions): void {
           }
         );
       } else {
-        log.warn(
-          '[Main] Account-0 WebContents unavailable for content-loaded marker (host-only sampling avoided)'
-        );
+        log.warn('[Main] No account-0 WebContents');
       }
 
       // ===== UI PHASE =====
       await runPhase('ui', context);
       if (!isStartupAdmissionOpen()) return;
 
-      perfMonitor.mark('features-loaded', 'Critical features initialized');
-      log.info('[Main] Critical features initialized');
+      perfMonitor.mark('features-loaded');
 
       // ===== DEFERRED PHASE =====
       // Defer non-critical features using setImmediate.

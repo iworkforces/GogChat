@@ -53,10 +53,13 @@ import {
   stopSessionMaintenance,
 } from './accountSessionMaintenance.js';
 import {
-  buildAccountWindowState,
-  persistAccountWindowState,
-  readAccountWindowState as _getAccountWindowState,
-} from './accountWindowsStore.js';
+  applyAccountWindowState,
+  readAccountWindowState,
+  readNormalBounds,
+  submitAccountWindowState,
+  unwatchAccountWindow,
+  watchAccountWindow,
+} from './accountWindowPersistenceBridge.js';
 import { getIconCache } from '../platform/iconCache.js';
 import { installPermissionHandlers } from '../security/permissionHandler.js';
 import { ensureNotificationPermission } from '../security/notificationAccess.js';
@@ -236,6 +239,10 @@ export class AccountViewManager implements IAccountWindowManager {
     });
 
     this.hostWindow = window;
+    // Layout listener is already registered. Restore, then watch, so a
+    // bounds handler cannot run ahead of view layout or throw past it.
+    applyAccountWindowState(window, asAccountIndex(0));
+    watchAccountWindow(window, asAccountIndex(0));
     log.info('[AccountViewManager] Host window created');
     return window;
   }
@@ -323,7 +330,7 @@ export class AccountViewManager implements IAccountWindowManager {
         // window if the helper opens any modal, which is the correct UX.
         const sessionCarrier = asUnsafe<BrowserWindow & { webContents: WebContents }>(
           view,
-          'WebContentsView shares webContents-shaped surface with BrowserWindow for installPermissionHandlers/installHeaderFix'
+          'view webContents'
         );
         installPermissionHandlers(sessionCarrier);
         installHeaderFix(sessionCarrier);
@@ -596,6 +603,9 @@ export class AccountViewManager implements IAccountWindowManager {
     for (const accountIndex of Array.from(this.views.keys())) {
       this.unregisterAccount(accountIndex);
     }
+    if (this.hostWindow) {
+      unwatchAccountWindow(this.hostWindow);
+    }
     if (this.hostWindow && !this.hostWindow.isDestroyed()) {
       if (this.resizeHandler) {
         this.hostWindow.removeListener('resize', this.resizeHandler);
@@ -668,13 +678,15 @@ export class AccountViewManager implements IAccountWindowManager {
    * branching. Other account indices are intentional no-ops.
    */
   saveAccountWindowState(accountIndex: AccountIndex): void {
-    if (!this.hostWindow || this.hostWindow.isDestroyed()) return;
     if (accountIndex !== 0) return;
-    void persistAccountWindowState(accountIndex, buildAccountWindowState(this.hostWindow));
+    if (!this.hostWindow || this.hostWindow.isDestroyed()) return;
+    const captured = readNormalBounds(this.hostWindow);
+    if (!captured) return;
+    submitAccountWindowState(asAccountIndex(0), captured);
   }
 
   getAccountWindowState(accountIndex: AccountIndex): AccountWindowState | null {
-    return _getAccountWindowState(accountIndex);
+    return readAccountWindowState(accountIndex);
   }
 
   // ─── Hydration (park / unpark; not create/destroy) ───────────────────────

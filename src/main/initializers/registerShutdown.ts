@@ -16,6 +16,7 @@ import {
   destroyAccountWindowManager,
   peekAccountWindowManager,
 } from '../utils/account/accountWindowManager.js';
+import { flushAccountWindowPersistence } from '../utils/account/accountWindowPersistenceBridge.js';
 import type { AccountIndex } from '../../shared/types/branded.js';
 import { destroyAllSingletons } from './singletonDestroyers.js';
 import { closeStartupAdmission } from '../utils/lifecycle/startupAdmission.js';
@@ -47,13 +48,13 @@ async function runShutdownStage(
       log.error(`[Main] ${name} failed:`, error);
     });
   if (signal.aborted) {
-    log.warn(`[Main] ${name} abandoned — deadline already expired`);
+    log.warn(`[Main] ${name} past deadline`);
     return;
   }
 
   const deadline = Promise.withResolvers<void>();
   const onAbort = (): void => {
-    log.warn(`[Main] ${name} abandoned after deadline`);
+    log.warn(`[Main] ${name} timed out`);
     deadline.resolve();
   };
   signal.addEventListener('abort', onAbort, { once: true });
@@ -99,40 +100,44 @@ export function registerShutdownHandler(
       AbortSignal.any([deadlines.createStageSignal(), overall]);
 
     void (async () => {
-      log.info('[Main] ========== Application Shutdown ==========');
-
       const hangStage = process.env['GOGCHAT_TEST_HANG_SHUTDOWN'];
       const hang = (): Promise<void> => new Promise(() => undefined);
       let diagnosticAccountIndices: readonly AccountIndex[] = [];
 
-      log.info('[Main] Cleaning up feature resources...');
       await runShutdownStage(
-        'Feature cleanup',
+        'features',
         hangStage === 'feature' ? hang : (signal) => cleanupAll(getSharedFeatureContext(), signal),
         createStageSignal
       );
       await runShutdownStage(
-        'Global resource cleanup',
+        'global',
         hangStage === 'global'
           ? hang
           : () => getCleanupManager().cleanup({ includeGlobalResources: true, logDetails: true }),
         createStageSignal
       );
       await runShutdownStage(
-        'Account window manager cleanup',
+        'accounts',
         hangStage === 'accounts'
           ? hang
-          : () => {
+          : async () => {
               const manager = peekAccountWindowManager();
-              if (manager) {
-                diagnosticAccountIndices = manager.listAccountIndices();
+              try {
+                if (manager) {
+                  diagnosticAccountIndices = manager.listAccountIndices();
+                  for (const accountIndex of diagnosticAccountIndices) {
+                    manager.saveAccountWindowState(accountIndex);
+                  }
+                  await flushAccountWindowPersistence();
+                }
+              } finally {
+                destroyAccountWindowManager();
               }
-              destroyAccountWindowManager();
             },
         createStageSignal
       );
       await runShutdownStage(
-        'Shutdown diagnostics',
+        'diagnostics',
         hangStage === 'diagnostics'
           ? hang
           : async () => {
@@ -143,20 +148,18 @@ export function registerShutdownHandler(
         createStageSignal
       );
       await runShutdownStage(
-        'Singleton destruction',
+        'singletons',
         hangStage === 'singletons' ? hang : destroyAllSingletons,
         createStageSignal
       );
-
-      log.info('[Main] =====================================================');
     })()
       .catch((error: unknown) => {
-        log.error('[Main] Shutdown sequence failed:', error);
+        log.error('[Main] Shutdown failed:', error);
       })
       .finally(exitOnce);
 
     const onOverall = (): void => {
-      log.warn('[Main] Overall shutdown abandoned after deadline');
+      log.warn('[Main] Shutdown deadline');
       exitOnce();
     };
     if (overall.aborted) {
