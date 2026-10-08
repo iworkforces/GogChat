@@ -148,8 +148,6 @@ vi.mock('./utils/security/encryptionKey', () => ({
     key: 'test-encryption-key-hex-string',
     migrationPending: false,
   })),
-  needsMigration: vi.fn(async () => false),
-  completeMigration: vi.fn(async () => null),
 }));
 
 // Mock electron-store
@@ -328,16 +326,8 @@ describe('initializeStore', () => {
     expect(getOrCreateEncryptionKey).toHaveBeenCalledOnce();
   });
 
-  it('should not call needsMigration separately (migrationPending comes from getOrCreateEncryptionKey)', async () => {
-    const { initializeStore } = await import('./config');
-    const { needsMigration } = await import('./utils/security/encryptionKey');
-    await initializeStore();
-    expect(needsMigration).not.toHaveBeenCalled();
-  });
-
   it('should perform migration when getOrCreateEncryptionKey signals migrationPending', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
@@ -349,7 +339,6 @@ describe('initializeStore', () => {
     const { initializeStore } = await import('./config');
     await initializeStore();
 
-    expect(completeMigration).not.toHaveBeenCalled();
     expect(mockStore.set).toHaveBeenCalledWith('app', { autoCheckForUpdates: true });
     expect(fsOps.files.has(configPaths().keyFile)).toBe(true);
   });
@@ -396,8 +385,7 @@ describe('initializeStore', () => {
   });
 
   it('should skip migration when migrationPending is false', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: false,
@@ -406,7 +394,8 @@ describe('initializeStore', () => {
     const { initializeStore } = await import('./config');
     await initializeStore();
 
-    expect(completeMigration).not.toHaveBeenCalled();
+    expect(mockStore.constructs).toBe(1);
+    expect(fsOps.files.has(configPaths().keyFile)).toBe(false);
   });
 
   it('should migrate all data entries from old store to new store', async () => {
@@ -444,8 +433,7 @@ describe('initializeStore', () => {
   it('writes the new ciphertext before it replaces the legacy file', async () => {
     const fsSpies = spyConfigFiles();
     try {
-      const { getOrCreateEncryptionKey, completeMigration } =
-        await import('./utils/security/encryptionKey');
+      const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
       const log = (await import('electron-log')).default;
       vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
         key: 'test-encryption-key-hex-string',
@@ -490,7 +478,6 @@ describe('initializeStore', () => {
       expect(fsOps.files.has(keyStaged)).toBe(false);
       expect(mockStore.set).toHaveBeenCalledWith('app', { autoCheckForUpdates: true });
       expect(mockStore.set).not.toHaveBeenCalledWith('__internal__', expect.anything());
-      expect(completeMigration).not.toHaveBeenCalled();
       expect(log.info).toHaveBeenCalledWith(
         '[Config] Starting migration from legacy to SafeStorage encryption'
       );
@@ -503,8 +490,7 @@ describe('initializeStore', () => {
   });
 
   it('leaves the legacy file in place when a key file already exists', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
@@ -523,7 +509,6 @@ describe('initializeStore', () => {
     expect(fsOps.files.has(backup)).toBe(false);
     expect(fsOps.files.get(keyFile)?.toString()).toBe('existing-key');
     expect(mockStore.set).not.toHaveBeenCalledWith('app', expect.anything());
-    expect(completeMigration).not.toHaveBeenCalled();
   });
 
   it('drops the staged key when the rekeyed store cannot open', async () => {
@@ -596,8 +581,7 @@ describe('initializeStore', () => {
       throw thrown;
     });
     try {
-      const { getOrCreateEncryptionKey, completeMigration } =
-        await import('./utils/security/encryptionKey');
+      const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
       const log = (await import('electron-log')).default;
       vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
         key: 'test-encryption-key-hex-string',
@@ -612,7 +596,6 @@ describe('initializeStore', () => {
       const { file, keyFile, keyStaged } = configPaths();
       expect(store).toBeDefined();
       expect(mockStore.constructs).toBe(2);
-      expect(completeMigration).not.toHaveBeenCalled();
       expect(fsOps.files.get(file)?.toString()).toBe('legacy');
       expect(fsOps.files.has(keyFile)).toBe(false);
       expect(fsOps.files.has(keyStaged)).toBe(false);
