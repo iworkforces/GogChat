@@ -58,7 +58,7 @@ class MockNotification extends EventTarget {
     notificationInstances.set(this._id, { onclick: this.onclick });
 
     // Defense-in-depth: validate before sending to main process.
-    // Main-side handler also validates via createSecureIPCHandler,
+    // Main-side handler also validates via defineIPC,
     // but preload-side validation catches bad data early — especially
     // important since this script runs with contextIsolation: false.
     const notificationData = {

@@ -93,9 +93,9 @@ vi.mock('../../shared/dataValidators.js', () => ({
   ),
 }));
 
-const createSecureIPCHandlerMock = vi.fn();
+const defineIPCMock = vi.fn();
 vi.mock('../utils/ipc/defineIPC.js', () => ({
-  defineIPC: createSecureIPCHandlerMock,
+  defineIPC: defineIPCMock,
 }));
 
 const getRateLimiterMock = vi.fn().mockReturnValue({
@@ -134,7 +134,7 @@ describe('handleNotification feature', () => {
       (_event: unknown, fallback: unknown) => fallback
     );
 
-    createSecureIPCHandlerMock.mockImplementation(() => () => {
+    defineIPCMock.mockImplementation(() => () => {
       // cleanup
     });
   });
@@ -143,10 +143,10 @@ describe('handleNotification feature', () => {
     const feature = await import('./handleNotification.js');
     feature.default(fakeWindow as unknown as Electron.BrowserWindow);
 
-    expect(createSecureIPCHandlerMock).toHaveBeenCalledWith(
+    expect(defineIPCMock).toHaveBeenCalledWith(
       expect.objectContaining({ channel: 'notificationShow' })
     );
-    expect(createSecureIPCHandlerMock).toHaveBeenCalledWith(
+    expect(defineIPCMock).toHaveBeenCalledWith(
       expect.objectContaining({ channel: 'notificationClicked' })
     );
   });
@@ -155,7 +155,7 @@ describe('handleNotification feature', () => {
     const feature = await import('./handleNotification.js');
     feature.default(fakeWindow as unknown as Electron.BrowserWindow);
 
-    const handlerConfig = createSecureIPCHandlerMock.mock.calls.find(
+    const handlerConfig = defineIPCMock.mock.calls.find(
       (call: unknown[]) => (call[0] as { channel: string }).channel === 'notificationShow'
     )?.[0] as { handler: (data: unknown, event?: unknown) => void };
 
@@ -198,7 +198,7 @@ describe('handleNotification feature', () => {
     const feature = await import('./handleNotification.js');
     feature.default(fakeWindow as unknown as Electron.BrowserWindow);
 
-    const handlerConfig = createSecureIPCHandlerMock.mock.calls.find(
+    const handlerConfig = defineIPCMock.mock.calls.find(
       (call: unknown[]) => (call[0] as { channel: string }).channel === 'notificationClicked'
     )?.[0] as { handler: (data: unknown, event?: unknown) => void };
 

@@ -7,7 +7,6 @@
  * Cleanup callbacks registered:
  * - rateLimiter: Destroys the IPC rate limiter
  * - deduplicator: Destroys the IPC deduplicator
- * - ipcHandlers: Cleans up global IPC handlers
  * - iconCache: Clears the icon cache
  * - configCache: Clears the config cache
  */
@@ -25,19 +24,16 @@ export async function registerGlobalCleanups(): Promise<void> {
   const [
     { destroyRateLimiter },
     { destroyDeduplicator },
-    { cleanupGlobalHandlers },
     { getIconCache: getIconCacheLazy },
     { clearConfigCache },
   ] = await Promise.all([
     import('../utils/ipc/rateLimiter.js'),
     import('../utils/ipc/ipcDeduplicator.js'),
-    import('../utils/ipc/ipcHelper.js'),
     import('../utils/platform/iconCache.js'),
     import('../utils/config/configCache.js'),
   ]);
   manager.registerGlobalCleanupCallback('rateLimiter', destroyRateLimiter, 'Rate limiter');
   manager.registerGlobalCleanupCallback('deduplicator', destroyDeduplicator, 'Deduplicator');
-  manager.registerGlobalCleanupCallback('ipcHandlers', cleanupGlobalHandlers, 'IPC handlers');
   manager.registerGlobalCleanupCallback(
     'iconCache',
     () => getIconCacheLazy().clear(),

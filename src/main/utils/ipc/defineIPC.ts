@@ -1,21 +1,13 @@
 /**
- * Unified IPC handler factory.
+ * IPC handler factory.
  *
- * `defineIPC(config)` is the standardized entry point that replaces the trio
- * of `createSecureIPCHandler` / `createSecureReplyHandler` /
- * `createSecureInvokeHandler` from `ipcHelper.ts`.
- *
- * The shared concerns (rate-limit → validate → log → optional dedup → handle
- * → catch) are implemented once, and the handler shape is selected by a
- * discriminated `kind` field:
+ * `defineIPC(config)` registers one handler. `kind` selects the shape:
  *
  *   - kind: 'on'      one-way IPC (renderer → main, no reply)
  *   - kind: 'reply'   one-way IPC that responds via `event.reply()`
  *   - kind: 'invoke'  request/response via `ipcRenderer.invoke()`
  *
- * The legacy `createSecure*Handler` exports remain in `ipcHelper.ts` (now
- * deprecated) and continue to work unchanged. New handlers should prefer
- * `defineIPC`. Existing handlers may be migrated incrementally.
+ * Shared order: rate-limit → validate → log → optional dedup → handle → catch.
  */
 
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';

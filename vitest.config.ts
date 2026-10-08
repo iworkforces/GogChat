@@ -56,7 +56,7 @@ export default defineConfig({
         'src/main/utils/lifecycle/featureContextStore.ts',
         'src/main/utils/lifecycle/cdpMetrics.ts',
         // Thin glue / dual-path factories with extensive Electron surface area;
-        // covered indirectly via ipcHelper and platform integration tests.
+        // covered indirectly via platform integration tests.
         'src/main/utils/platform/trayIconState.ts',
         'src/shared/validators.ts',
       ],
