@@ -23,21 +23,14 @@
  * `init()` is called once and attaches watchers for every account currently
  * registered as bootstrap (account-0, account-1, …).
  *
- * `watchBootstrapAccount(accountIndex)` is re-exported from `../utils/account/bootstrapWatcher.js`
- * so callers can attach a watcher for a single account at any time — e.g. when
- * a new secondary account window is created during a routed sign-in flow.
+ * Callers that need one account attach `watchBootstrapAccount` from
+ * `../utils/account/bootstrapWatcher.js` directly.
  */
 
 import log from 'electron-log';
 import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import { getAccountWindowManager } from '../utils/account/accountWindowManager.js';
-import {
-  watchBootstrapAccount,
-  cleanupBootstrapPromotion,
-} from '../utils/account/bootstrapWatcher.js';
-
-// Re-export utility functions to preserve the existing public API
-export { watchBootstrapAccount, cleanupBootstrapPromotion };
+import { watchBootstrapAccount } from '../utils/account/bootstrapWatcher.js';
 
 // ─── feature init ─────────────────────────────────────────────────────────────
 
