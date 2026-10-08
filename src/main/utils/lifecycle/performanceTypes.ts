@@ -6,8 +6,7 @@
  * its own module to break the type-only circular dependency that existed
  * between `performanceMonitor.ts` ↔ `performanceExport.ts`.
  *
- * Both modules import from this file. `performanceMonitor.ts` re-exports
- * these symbols for backward compatibility.
+ * Both modules import from this file.
  *
  * @module performanceTypes
  */

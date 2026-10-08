@@ -26,8 +26,9 @@ export default defineConfig({
         'src/preload/overrideNotifications.ts',
         'src/shared/types.ts',
         'src/shared/types/**',
-        // Barrel re-exports (no runtime logic to cover)
-        'src/**/index.ts',
+        // Entry scripts. Utility barrels were removed; these indexes are app entries.
+        'src/preload/index.ts',
+        'src/offline/index.ts',
         // Main process entry points / orchestrators (require full Electron environment)
         'src/main/generated/**',
         'src/main/index.ts',
