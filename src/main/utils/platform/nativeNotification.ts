@@ -18,7 +18,6 @@ import type { AccountIndex } from '../../../shared/types/branded.js';
 import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 import { focusNotificationSource } from './notificationFocus.js';
 import {
-  UNREAD_DELTA_TAG_BASE,
   accountNotificationGroupId,
   formatAccountNotificationLabel,
   namespaceNotificationTag,
@@ -243,9 +242,6 @@ export function cleanupActiveNativeNotifications(): void {
   });
   activeNotifications.clear();
 }
-
-/** @deprecated Use UNREAD_DELTA_TAG_BASE + namespaceNotificationTag */
-export const UNREAD_DELTA_NOTIFICATION_TAG = UNREAD_DELTA_TAG_BASE;
 
 /**
  * Pure policy: whether an unread-count transition should produce a synthetic banner.
