@@ -9,7 +9,8 @@ import { registerCleanupTask } from './utils/lifecycle/resourceCleanup.js';
 import windowWrapper from './windowWrapper.js';
 
 import { registerShutdownHandler } from './initializers/registerShutdown.js';
-import { registerAppReady, getMostRecentWindow } from './initializers/registerAppReady.js';
+import { registerAppReady } from './initializers/registerAppReady.js';
+import { getMostRecentWindow } from './utils/account/accountWindowManager.js';
 import { APP_IDENTITY } from '../shared/appIdentity.js';
 
 // Cap V8 heap per renderer (default 512MB, conservative for Google Chat SPA).

@@ -124,7 +124,6 @@ vi.mock('../utils/account/accountWindowManager.js', () => ({
   getAccountWindowManager: mocks.getAccountWindowManager,
   createAccountWindow: mocks.createAccountWindow,
   getWindowForAccount: mocks.getWindowForAccount,
-  getMostRecentWindow: vi.fn(),
 }));
 vi.mock('./registerGlobalCleanups.js', () => ({
   registerGlobalCleanups: mocks.registerGlobalCleanups,

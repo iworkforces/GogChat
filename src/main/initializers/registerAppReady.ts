@@ -18,11 +18,7 @@ import {
   getAccountWindowManager,
   createAccountWindow,
   getWindowForAccount,
-  getMostRecentWindow,
 } from '../utils/account/accountWindowManager.js';
-// Re-exported so the thin index.ts orchestrator pulls window lookup from the
-// same initializer module surface used for app-ready wiring.
-export { getMostRecentWindow };
 import { registerGlobalCleanups } from './registerGlobalCleanups.js';
 import { initializeStore } from '../config.js';
 import { prepareAccountWindows } from '../utils/account/accountWindowPersistenceBridge.js';
