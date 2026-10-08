@@ -58,7 +58,6 @@ export default defineConfig({
         // Thin glue / dual-path factories with extensive Electron surface area;
         // covered indirectly via platform integration tests.
         'src/main/utils/platform/trayIconState.ts',
-        'src/shared/validators.ts',
       ],
       thresholds: {
         statements: 94,
