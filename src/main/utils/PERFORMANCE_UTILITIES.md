@@ -82,8 +82,6 @@ console.log(`Icon paths:`, stats.icons);
 
 Used by:
 - `windowWrapper.ts` - Main window icon
-- `trayIcon.ts` - System tray icon
-- `badgeIcon.ts` - Badge overlay and tray updates
 - `inOnline.ts` - Offline notification icon
 - (About/Update dialogs load `normal/scalable.svg` via fs data URI + CSS aurora; not iconCache)
 
