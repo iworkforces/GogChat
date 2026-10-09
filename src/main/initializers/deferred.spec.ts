@@ -3,17 +3,16 @@
  *
  * Consolidates the previous deferredSystem / deferredWindow / deferredNetwork
  * registration modules into one declarative array. Loaded via setImmediate
- * after the main window is ready. Side effects (setTrayIcon, registerCleanupTask,
+ * after the main window is ready. Side effects (registerCleanupTask,
  * updateContext) are routed through the `callbacks` slot on FeatureContext.
  */
 
-import type { Tray } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants.js';
 import type { FeatureSpec } from '../utils/lifecycle/featureConfigTypes.js';
 import { SUPPORTED_PLATFORM_NAMES } from '../utils/platform/platformDetection.js';
 
 export const DEFERRED_FEATURES = [
-  // Registers About menu action (native aurora window); tray + menu depend on it
+  // Registers About menu action (native aurora window); the app menu depends on it
   {
     name: 'aboutPanel',
     phase: 'deferred',
@@ -22,32 +21,17 @@ export const DEFERRED_FEATURES = [
       await import('../features/aboutPanel.js');
     },
   },
-  // System: tray icon — other tray-dependent features depend on it
-  {
-    name: 'trayIcon',
-    phase: 'deferred',
-    dependencies: ['aboutPanel'],
-    description: 'System tray icon',
-    init: async ({ mainWindow, callbacks }) => {
-      if (!mainWindow) return;
-      const module = await import('../features/trayIcon.js');
-      const icon = module.default(mainWindow);
-      callbacks?.setTrayIcon(icon);
-      callbacks?.updateContext({ trayIcon: icon });
-    },
-  },
   {
     name: 'badgeIcons',
     phase: 'deferred',
-    dependencies: ['trayIcon'],
-    description: 'Badge/overlay icon for unread count',
+    description: 'Dock/app badge for unread count',
     ipcChannels: {
       listen: [IPC_CHANNELS.FAVICON_CHANGED, IPC_CHANNELS.UNREAD_COUNT],
     },
-    init: async ({ mainWindow, trayIcon }) => {
-      if (!mainWindow || !trayIcon) return;
+    init: async ({ mainWindow }) => {
+      if (!mainWindow) return;
       const module = await import('../features/badgeIcon.js');
-      module.default(mainWindow, trayIcon);
+      module.default(mainWindow);
     },
   },
   {
@@ -166,8 +150,7 @@ export const DEFERRED_FEATURES = [
   {
     name: 'closeToTray',
     phase: 'deferred',
-    dependencies: ['trayIcon'],
-    description: 'Close to tray behavior',
+    description: 'Hide on close and keep the window for Dock activate',
     init: async ({ mainWindow }) => {
       if (!mainWindow) return;
       const module = await import('../features/closeToTray.js');
@@ -219,6 +202,3 @@ export const DEFERRED_FEATURES = [
     },
   },
 ] as const satisfies readonly FeatureSpec[];
-
-// Re-export for type inference completeness in callsites that import callbacks
-export type { Tray };

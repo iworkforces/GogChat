@@ -162,7 +162,7 @@ test.describe('User Workflows', () => {
   });
 
   test.describe('Window Management', () => {
-    test('should minimize to tray', async ({ electronApp }) => {
+    test('should keep a hidden window alive', async ({ electronApp }) => {
       await electronApp.evaluate(({ BrowserWindow }) => {
         BrowserWindow.getAllWindows()[0]?.hide();
       });
@@ -177,12 +177,11 @@ test.describe('User Workflows', () => {
       expect(windows[0].isDestroyed).toBe(false);
     });
 
-    test('should restore from tray', async ({ electronApp, mainWindow }) => {
+    test('should show a hidden window again', async ({ electronApp, mainWindow }) => {
       await electronApp.evaluate(({ BrowserWindow }) => {
         BrowserWindow.getAllWindows()[0]?.hide();
       });
 
-      // Simulate tray click to restore
       await electronApp.evaluate(({ BrowserWindow }) => {
         const windows = BrowserWindow.getAllWindows();
         if (windows.length > 0) {

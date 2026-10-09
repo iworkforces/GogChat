@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { electronMock, MockBrowserWindow, MockTray } from '../../mocks/electron';
+import { electronMock, MockBrowserWindow } from '../../mocks/electron';
 
 // Mock Electron module
 vi.mock('electron', () => electronMock);
@@ -46,7 +46,6 @@ vi.mock('../../../src/shared/validators', () => ({
 
 describe('Badge Icon Feature', () => {
   let mainWindow: MockBrowserWindow;
-  let trayIcon: MockTray;
   let badgeIconFeature: any;
 
   beforeEach(() => {
@@ -54,9 +53,7 @@ describe('Badge Icon Feature', () => {
     electronMock.reset();
     vi.clearAllMocks();
 
-    // Create window and tray
     mainWindow = new MockBrowserWindow();
-    trayIcon = new MockTray('icon.png');
 
     // Set platform
     Object.defineProperty(process, 'platform', {
@@ -72,7 +69,7 @@ describe('Badge Icon Feature', () => {
   it('should initialize badge icon feature', async () => {
     // Import the feature (this would be the actual badge icon module)
     // For now, we'll create a simplified version
-    const initBadgeIcon = (window: any, tray: any) => {
+    const initBadgeIcon = (window: any) => {
       const { ipcMain, app } = electronMock;
 
       ipcMain.on('unreadCount', (event: any, count: number) => {
@@ -89,10 +86,6 @@ describe('Badge Icon Feature', () => {
             window.setOverlayIcon(null, `${count} unread messages`);
           }
 
-          // Update tray tooltip
-          if (tray) {
-            tray.setToolTip(`GogChat - ${count} unread`);
-          }
         } catch (error) {
           console.error('Failed to update badge:', error);
         }
@@ -101,7 +94,7 @@ describe('Badge Icon Feature', () => {
       return { updateBadge: (count: number) => ipcMain.emit('unreadCount', {}, count) };
     };
 
-    badgeIconFeature = initBadgeIcon(mainWindow, trayIcon);
+    badgeIconFeature = initBadgeIcon(mainWindow);
     expect(badgeIconFeature).toBeDefined();
     expect(badgeIconFeature.updateBadge).toBeInstanceOf(Function);
   });
@@ -113,7 +106,7 @@ describe('Badge Icon Feature', () => {
     const setBadgeSpy = vi.spyOn(app.dock!, 'setBadge');
 
     // Initialize feature
-    badgeIconFeature = mockBadgeFeature.default(mainWindow, trayIcon);
+    badgeIconFeature = mockBadgeFeature.default(mainWindow);
 
     // Send unread count
     ipcMain.emit('unreadCount', {}, 5);
@@ -127,7 +120,7 @@ describe('Badge Icon Feature', () => {
     const setBadgeSpy = vi.spyOn(app.dock!, 'setBadge');
 
     // Initialize feature
-    badgeIconFeature = mockBadgeFeature.default(mainWindow, trayIcon);
+    badgeIconFeature = mockBadgeFeature.default(mainWindow);
 
     // Send zero count
     ipcMain.emit('unreadCount', {}, 0);
@@ -142,7 +135,7 @@ describe('Badge Icon Feature', () => {
     const setOverlaySpy = vi.spyOn(mainWindow, 'setOverlayIcon');
 
     // Initialize feature
-    badgeIconFeature = mockBadgeFeature.default(mainWindow, trayIcon);
+    badgeIconFeature = mockBadgeFeature.default(mainWindow);
 
     // Send unread count
     electronMock.ipcMain.emit('unreadCount', {}, 3);
@@ -164,25 +157,12 @@ describe('Badge Icon Feature', () => {
     });
   });
 
-  it('should update tray tooltip', () => {
-    const setTooltipSpy = vi.spyOn(trayIcon, 'setToolTip');
-
-    // Initialize feature
-    badgeIconFeature = mockBadgeFeature.default(mainWindow, trayIcon);
-
-    // Send unread count
-    electronMock.ipcMain.emit('unreadCount', {}, 7);
-
-    // Tooltip should be updated
-    expect(setTooltipSpy).toHaveBeenCalledWith(expect.stringContaining('7'));
-  });
-
   it('should handle large badge counts', () => {
     const { ipcMain, app } = electronMock;
     const setBadgeSpy = vi.spyOn(app.dock!, 'setBadge');
 
     // Initialize feature
-    badgeIconFeature = mockBadgeFeature.default(mainWindow, trayIcon);
+    badgeIconFeature = mockBadgeFeature.default(mainWindow);
 
     // Send large count
     ipcMain.emit('unreadCount', {}, 999);
@@ -212,7 +192,7 @@ describe('Badge Icon Feature', () => {
 
 // Mock badge feature for testing
 const mockBadgeFeature = {
-  default: (window: any, tray: any) => {
+  default: (window: any) => {
     const { ipcMain, app } = electronMock;
 
     const updateBadge = (count: number) => {
@@ -222,10 +202,6 @@ const mockBadgeFeature = {
         app.dock?.setBadge(count > 0 ? count.toString() : '');
       } else if (process.platform === 'win32') {
         window.setOverlayIcon(null, `${count} unread messages`);
-      }
-
-      if (tray) {
-        tray.setToolTip(`GogChat - ${count} unread`);
       }
     };
 

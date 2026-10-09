@@ -1,22 +1,22 @@
 /**
  * Badge handler helpers — extracted from features/badgeIcon.ts and the former
- * features/badgeHandlers.ts so that badgeIcon does not take a feature→feature
- * import on the trayIcon feature.
+ * features/badgeHandlers.ts. Dock/app badge only; no menu-bar tray.
  *
  * Owns:
  *   • decideIcon()         — pure favicon URL → IconType resolution
- *   • updateBadgeIcon()    — platform-specific dock badge update (macOS)
+ *   • updateBadgeIcon()    — platform-specific dock/app badge update
  *   • setupBadgeHandlers() — registers the two secure IPC handlers
  *                            (FAVICON_CHANGED + UNREAD_COUNT) with
  *                            rate limiting, deduplication, validation,
  *                            and error handling. Returns cleanup callbacks.
+ *                            Does not create or update a menu-bar tray.
  *
  * Unread counts are tracked per account (from IPC sender). Dock badge is the
  * sum across accounts, capped at BADGE.DISPLAY_MAX (99).
  */
 
 import { app } from 'electron';
-import type { BrowserWindow, IpcMainEvent, Tray, WebContents } from 'electron';
+import type { BrowserWindow, IpcMainEvent, WebContents } from 'electron';
 import log from 'electron-log';
 import {
   FAVICON_PATTERNS,
@@ -31,9 +31,7 @@ import { registerFastHandler } from '../ipc/ipcFastPath.js';
 import { validateFaviconURL } from '../../../shared/urlValidators.js';
 import { validateUnreadCount } from '../../../shared/dataValidators.js';
 import { configGet } from '../../config.js';
-import { getIconCache } from './iconCache.js';
 import { platform } from './platformDetection.js';
-import { setTrayUnread } from './trayIconState.js';
 import { assertNever } from '../../../shared/typeUtils.js';
 import {
   UNREAD_DELTA_TAG_BASE,
@@ -119,8 +117,7 @@ interface AccountBadgeState {
  * Register the FAVICON_CHANGED + UNREAD_COUNT IPC handlers.
  * Returns cleanup callbacks for each.
  */
-export function setupBadgeHandlers(window: BrowserWindow, trayIcon: Tray): BadgeHandlerCleanups {
-  let currentTrayIconType: IconType = ICON_TYPES.OFFLINE;
+export function setupBadgeHandlers(window: BrowserWindow): BadgeHandlerCleanups {
   let active = true;
   const stateByAccount = new Map<AccountIndex, AccountBadgeState>();
   const currentSenders = new Map<AccountIndex, WebContents>();
@@ -143,30 +140,10 @@ export function setupBadgeHandlers(window: BrowserWindow, trayIcon: Tray): Badge
 
   const renderPresentation = (): void => {
     let totalRaw = 0;
-    let unread = false;
-    let normal = false;
     for (const state of stateByAccount.values()) {
-      const faviconType =
-        state.faviconHref === undefined ? undefined : decideIcon(state.faviconHref);
       totalRaw += state.unreadCount ?? 0;
-      unread ||=
-        state.unreadCount === undefined ? faviconType === ICON_TYPES.BADGE : state.unreadCount > 0;
-      normal ||=
-        faviconType === undefined
-          ? state.unreadCount !== undefined
-          : faviconType !== ICON_TYPES.OFFLINE;
     }
     updateBadgeIcon(window, totalRaw);
-    if (platform.config.useTemplateTrayIcon) {
-      setTrayUnread(unread);
-    } else {
-      const type = unread ? ICON_TYPES.BADGE : normal ? ICON_TYPES.NORMAL : ICON_TYPES.OFFLINE;
-      if (type !== currentTrayIconType) {
-        currentTrayIconType = type;
-        trayIcon.setImage(getIconCache().getIcon(`resources/icons/${type}/16.png`));
-        log.debug(`[BadgeIcon] Tray icon updated to type: ${type}`);
-      }
-    }
   };
 
   const accountRemovedCleanup = onAccountRemoved((accountIndex) => {

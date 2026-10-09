@@ -20,7 +20,7 @@ export default (window: BrowserWindow) => {
     if (!willQuit) {
       event.preventDefault();
 
-      // Dehydrate background accounts 1+ when closing to tray.
+      // Dehydrate background accounts 1+ when hiding.
       // Account-0 stays alive for badge/notification updates.
       try {
         const manager = getAccountWindowManager();

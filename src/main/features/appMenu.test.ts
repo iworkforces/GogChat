@@ -234,7 +234,7 @@ describe('appMenu', () => {
     expect(Menu.setApplicationMenu).toHaveBeenCalled();
   });
 
-  it('includes File menu with Close To Tray action', () => {
+  it('includes File menu with Hide Window action', () => {
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -242,15 +242,33 @@ describe('appMenu', () => {
     const fileMenu = template.find((item: MenuItemConstructorOptions) => item.label === 'File');
     expect(fileMenu).toBeDefined();
 
-    const closeToTray = fileMenu.submenu.find(
-      (item: MenuItemConstructorOptions) => item.label === 'Close To Tray'
+    const hideWindow = fileMenu.submenu.find(
+      (item: MenuItemConstructorOptions) => item.label === 'Hide Window'
     );
-    expect(closeToTray).toBeDefined();
-    expect(closeToTray.accelerator).toBe('CommandOrControl+W');
+    expect(hideWindow).toBeDefined();
+    expect(hideWindow.accelerator).toBe('CommandOrControl+W');
 
-    // Invoke the click handler
-    closeToTray.click();
+    hideWindow.click();
     expect(window.hide).toHaveBeenCalled();
+  });
+
+  it('keeps Quit and About and does not label any item as a tray', () => {
+    const window = makeFakeWindow();
+    appMenu(window as BrowserWindow);
+
+    const template = Menu.buildFromTemplate.mock.calls[0][0] as MenuItemConstructorOptions[];
+    const labels: string[] = [];
+    const visit = (items: readonly MenuItemConstructorOptions[]): void => {
+      for (const item of items) {
+        if (typeof item.label === 'string') labels.push(item.label);
+        if (Array.isArray(item.submenu)) visit(item.submenu);
+      }
+    };
+    visit(template);
+
+    expect(labels).toContain('Quit');
+    expect(labels).toContain('About');
+    expect(labels.some((label) => /tray/i.test(label))).toBe(false);
   });
 
   it('includes File menu with Quit action', async () => {
