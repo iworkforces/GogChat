@@ -26,8 +26,9 @@ export default defineConfig({
         'src/preload/overrideNotifications.ts',
         'src/shared/types.ts',
         'src/shared/types/**',
-        // Barrel re-exports (no runtime logic to cover)
-        'src/**/index.ts',
+        // Entry scripts. Utility barrels were removed; these indexes are app entries.
+        'src/preload/index.ts',
+        'src/offline/index.ts',
         // Main process entry points / orchestrators (require full Electron environment)
         'src/main/generated/**',
         'src/main/index.ts',
@@ -55,9 +56,8 @@ export default defineConfig({
         'src/main/utils/lifecycle/featureContextStore.ts',
         'src/main/utils/lifecycle/cdpMetrics.ts',
         // Thin glue / dual-path factories with extensive Electron surface area;
-        // covered indirectly via ipcHelper and platform integration tests.
+        // covered indirectly via platform integration tests.
         'src/main/utils/platform/trayIconState.ts',
-        'src/shared/validators.ts',
       ],
       thresholds: {
         statements: 94,

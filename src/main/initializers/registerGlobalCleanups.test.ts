@@ -15,7 +15,6 @@ vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
 }));
 vi.mock('../utils/ipc/rateLimiter.js', () => ({ destroyRateLimiter: vi.fn() }));
 vi.mock('../utils/ipc/ipcDeduplicator.js', () => ({ destroyDeduplicator: vi.fn() }));
-vi.mock('../utils/ipc/ipcHelper.js', () => ({ cleanupGlobalHandlers: vi.fn() }));
 vi.mock('../utils/platform/iconCache.js', () => ({ getIconCache: vi.fn() }));
 vi.mock('../utils/config/configCache.js', () => ({ clearConfigCache: vi.fn() }));
 
@@ -32,7 +31,6 @@ describe('registerGlobalCleanups', () => {
     expect(mocks.registerGlobalCleanupCallback.mock.calls.map(([id]) => id)).toEqual([
       'rateLimiter',
       'deduplicator',
-      'ipcHandlers',
       'iconCache',
       'configCache',
       'sessionMaintenance',

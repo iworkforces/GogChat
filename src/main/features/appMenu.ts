@@ -1,5 +1,5 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from 'electron';
-import { Menu, app, clipboard } from 'electron';
+import { Menu, clipboard } from 'electron';
 import store, { configGet } from '../config.js';
 import environment from '../../environment.js';
 import { IPC_CHANNELS } from '../../shared/constants.js';
@@ -16,6 +16,7 @@ import {
   setStoredAccountLabel,
 } from '../utils/platform/accountLabelStore.js';
 import { getAccountWindowManager } from '../utils/account/accountWindowManager.js';
+import { exitAppAfterSavingWindows } from '../utils/account/exitAfterAccountWindows.js';
 import {
   getAccountURL,
   loadAccountURL,
@@ -112,7 +113,9 @@ function setAppMenu(window: BrowserWindow): void {
         },
         {
           label: 'Relaunch',
-          click: relaunchApp,
+          click: () => {
+            void relaunchApp();
+          },
         },
         {
           role: 'minimize',
@@ -131,7 +134,7 @@ function setAppMenu(window: BrowserWindow): void {
           label: 'Quit',
           accelerator: 'CommandOrControl+Q',
           click: () => {
-            app.exit();
+            void exitAppAfterSavingWindows();
           },
         },
       ],

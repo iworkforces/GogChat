@@ -90,10 +90,6 @@ vi.mock('../ipc/ipcDeduplicator.js', () => ({
   destroyDeduplicator: vi.fn(),
 }));
 
-vi.mock('../ipc/ipcHelper.js', () => ({
-  cleanupGlobalHandlers: vi.fn(),
-}));
-
 vi.mock('../platform/iconCache.js', () => ({
   getIconCache: vi.fn().mockReturnValue({
     clear: vi.fn(),
@@ -411,7 +407,7 @@ describe('ResourceCleanup', () => {
   describe('ResourceCleanupManager cleanup with includeGlobalResources', () => {
     it('cleans up global resources when includeGlobalResources is true', async () => {
       const { getCleanupManager } = await import('./resourceCleanup');
-      const { cleanupGlobalHandlers } = await import('../ipc/ipcHelper');
+      const ipcHandlers = vi.fn();
       const { destroyRateLimiter } = await import('../ipc/rateLimiter');
       const { destroyDeduplicator } = await import('../ipc/ipcDeduplicator');
       const { getIconCache } = await import('../platform/iconCache');
@@ -419,16 +415,15 @@ describe('ResourceCleanup', () => {
 
       const manager = getCleanupManager();
 
-      // Register global cleanup callbacks (same as registerBuiltInGlobalCleanups does at runtime)
       manager.registerGlobalCleanupCallback('rateLimiter', destroyRateLimiter);
       manager.registerGlobalCleanupCallback('deduplicator', destroyDeduplicator);
-      manager.registerGlobalCleanupCallback('ipcHandlers', cleanupGlobalHandlers);
+      manager.registerGlobalCleanupCallback('ipcHandlers', ipcHandlers);
       manager.registerGlobalCleanupCallback('iconCache', () => getIconCache().clear());
       manager.registerGlobalCleanupCallback('configCache', clearConfigCache);
 
       await manager.cleanup({ includeGlobalResources: true });
 
-      expect(cleanupGlobalHandlers).toHaveBeenCalled();
+      expect(ipcHandlers).toHaveBeenCalled();
       expect(destroyRateLimiter).toHaveBeenCalled();
       expect(destroyDeduplicator).toHaveBeenCalled();
       expect(getIconCache().clear).toHaveBeenCalled();

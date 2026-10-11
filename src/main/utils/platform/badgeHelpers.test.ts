@@ -118,7 +118,6 @@ vi.mock('./nativeNotification.js', () => ({
     opts.nextCount > opts.previousCount &&
     opts.nextCount > 0,
   clampBadgeDisplayCount: (count: number) => (count <= 0 ? 0 : count > 99 ? 99 : Math.floor(count)),
-  UNREAD_DELTA_NOTIFICATION_TAG: 'gogchat-unread-delta',
 }));
 vi.mock('./accountNotificationIdentity.js', () => ({
   resolveAccountIndexFromIpcEvent: (...args: unknown[]) => mockResolveAccount(...args),

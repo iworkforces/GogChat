@@ -14,11 +14,11 @@ Every handler should follow:
 4. Handle.
 5. Catch/log typed failures.
 
-Prefer `defineIPC({ kind: 'on' | 'reply' | 'invoke' })` for new handlers. `createSecure*Handler` in `ipcHelper.ts` is `@deprecated` and remains for older tests. Live features (`handleNotification`, `inOnline`, `passkeySupport`) already use `defineIPC`. Do not add ad-hoc `ipcMain.handle` / `ipcMain.on` calls.
+Use `defineIPC({ kind: 'on' | 'reply' | 'invoke' })` for handlers. Live features (`handleNotification`, `inOnline`, `passkeySupport`) use `defineIPC`. Do not add ad-hoc `ipcMain.handle` / `ipcMain.on` calls.
 
 ## Components
 
-- `defineIPC.ts` - current handler factory. `ipcHelper.ts` - legacy wrappers + shared option types.
+- `defineIPC.ts` - handler factory for `on`, `reply`, and `invoke`.
 - `rateLimiter.ts` - per-channel token bucket with 1s windows and stale cleanup. Keys are `${channel}:sender:${id}` when `event.sender.id` is present so multi-account senders are isolated.
 - `ipcDeduplicator.ts` - short promise sharing, default 100ms.
 - `ipcDeduplicationPatterns.ts` - key functions for safe dedup cases.

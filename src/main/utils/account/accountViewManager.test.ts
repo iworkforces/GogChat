@@ -123,6 +123,11 @@ const h = vi.hoisted(() => {
     public isMinimized: ReturnType<typeof vi.fn>;
     public isDestroyed: ReturnType<typeof vi.fn>;
     public getBounds: ReturnType<typeof vi.fn>;
+    public getNormalBounds?: () => { x: number; y: number; width: number; height: number };
+    public setBounds: ReturnType<typeof vi.fn>;
+    public setSize: ReturnType<typeof vi.fn>;
+    public center: ReturnType<typeof vi.fn>;
+    public maximize: ReturnType<typeof vi.fn>;
     public getContentSize: ReturnType<typeof vi.fn>;
     public removeListener_spy: Mock<
       (event: string | symbol, listener: (...a: unknown[]) => void) => void
@@ -162,6 +167,16 @@ const h = vi.hoisted(() => {
       this.isMinimized = vi.fn((): boolean => false);
       this.isDestroyed = vi.fn((): boolean => this.destroyed);
       this.getBounds = vi.fn(() => ({ ...this.bounds }));
+      this.setBounds = vi.fn((b: { x: number; y: number; width: number; height: number }): void => {
+        this.bounds = { ...b };
+      });
+      this.setSize = vi.fn((width: number, height: number): void => {
+        this.bounds = { ...this.bounds, width, height };
+      });
+      this.center = vi.fn();
+      this.maximize = vi.fn((): void => {
+        this.maximized = true;
+      });
       this.getContentSize = vi.fn((): [number, number] => [this.bounds.width, this.bounds.height]);
       const origRemove = EE.prototype.removeListener.bind(this);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -308,6 +323,11 @@ import {
 import * as accountHooks from './accountWebContentsHooks.js';
 import { configGet } from '../../config.js';
 import { flushAccountWindowsWrites } from './accountWindowsStore.js';
+import { getCleanupManager } from '../lifecycle/resourceCleanup.js';
+import {
+  prepareAccountWindows,
+  resetAccountWindowPersistenceForTests,
+} from './accountWindowPersistenceBridge.js';
 import {
   markAsBootstrap as trackerMark,
   isBootstrap as trackerIsBootstrap,
@@ -345,7 +365,7 @@ function viewOf(manager: AccountViewManager, idx: number): MockViewInstance {
   return found;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   // Fresh state for each test
   h.createdWindows.length = 0;
   h.bootstrapSet.clear();
@@ -354,10 +374,13 @@ beforeEach(() => {
   h.MockWC.nextId = 1;
   destroyAccountViewManager();
   vi.clearAllMocks();
+  await prepareAccountWindows();
 });
 
-afterEach(() => {
+afterEach(async () => {
   destroyAccountViewManager();
+  await resetAccountWindowPersistenceForTests();
+  getCleanupManager().reset();
 });
 
 // ---------------------------------------------------------------------------
@@ -812,6 +835,102 @@ describe('AccountViewManager — saveAccountWindowState / getAccountWindowState'
     m.createAccountWindow('https://x/', asAccountIndex(0));
     m.saveAccountWindowState(asAccountIndex(0));
     expect(m.getAccountWindowState(asAccountIndex(99))).toBeNull();
+  });
+
+  it('restores only the host window and keeps a secondary entry', async () => {
+    h.mockStore['app'] = { autoCheckForUpdates: false };
+    h.mockStore['accountWindows'] = {
+      0: { bounds: { x: 15, y: 25, width: 1100, height: 760 }, isMaximized: true },
+      3: { bounds: { x: 300, y: 220, width: 640, height: 580 }, isMaximized: false },
+    };
+    const m = new AccountViewManager();
+    m.createAccountWindow('https://x/', asAccountIndex(0));
+    const host = lastWindow();
+    expect(host.setBounds).toHaveBeenCalledWith({ x: 15, y: 25, width: 1100, height: 760 });
+    expect(host.setBounds.mock.invocationCallOrder[0]).toBeLessThan(
+      host.maximize.mock.invocationCallOrder[0] ?? 0
+    );
+    host.bounds = { x: 40, y: 50, width: 1000, height: 700 };
+    host.maximized = false;
+    m.saveAccountWindowState(asAccountIndex(0));
+    await flushAccountWindowsWrites();
+    const stored = h.mockStore['accountWindows'] as Record<
+      number,
+      { bounds: { x: number }; isMaximized: boolean }
+    >;
+    expect(stored[0]?.bounds.x).toBe(40);
+    expect(stored[3]).toEqual({
+      bounds: { x: 300, y: 220, width: 640, height: 580 },
+      isMaximized: false,
+    });
+    expect(m.getAccountWindowState(asAccountIndex(3))).toEqual({
+      bounds: { x: 300, y: 220, width: 640, height: 580 },
+      isMaximized: false,
+    });
+    expect(h.mockStore['app']).toEqual({ autoCheckForUpdates: false });
+  });
+
+  it('centers the host when the saved account-0 coordinate is null', () => {
+    h.mockStore['accountWindows'] = {
+      0: { bounds: { x: null, y: null, width: 800, height: 600 }, isMaximized: false },
+    };
+    const m = new AccountViewManager();
+    m.createAccountWindow('https://x/', asAccountIndex(0));
+    const host = lastWindow();
+    expect(host.setSize).toHaveBeenCalledWith(800, 600);
+    expect(host.center).toHaveBeenCalledOnce();
+    expect(host.setBounds).not.toHaveBeenCalled();
+  });
+
+  it('persists host normal bounds and still saves after a failed write', async () => {
+    const { configSet } = await import('../../config.js');
+    let failed = false;
+    vi.mocked(configSet).mockImplementation((key: string, value: unknown) => {
+      if (key === 'accountWindows' && !failed) {
+        failed = true;
+        throw new Error('disk full');
+      }
+      h.mockStore[key] = value;
+    });
+    const m = new AccountViewManager();
+    m.createAccountWindow('https://x/', asAccountIndex(0));
+    const host = lastWindow();
+    host.getNormalBounds = () => ({ x: 4, y: 5, width: 900, height: 700 });
+    host.getBounds.mockReturnValue({ x: 0, y: 0, width: 1400, height: 900 });
+    host.maximized = true;
+    m.saveAccountWindowState(asAccountIndex(0));
+    await flushAccountWindowsWrites();
+    host.bounds = { x: 6, y: 7, width: 910, height: 710 };
+    host.getNormalBounds = () => ({ x: 6, y: 7, width: 910, height: 710 });
+    m.saveAccountWindowState(asAccountIndex(0));
+    await flushAccountWindowsWrites();
+    const stored = configGet('accountWindows') as Record<
+      number,
+      { bounds: { x: number; width: number }; isMaximized: boolean }
+    >;
+    expect(stored[0]).toEqual({
+      bounds: { x: 6, y: 7, width: 910, height: 710 },
+      isMaximized: true,
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      '[AccountWindows] Failed to persist account window state:',
+      expect.objectContaining({ message: '[redacted]' })
+    );
+    vi.mocked(configSet).mockImplementation((key: string, value: unknown) => {
+      h.mockStore[key] = value;
+    });
+  });
+
+  it('removes host bounds listeners during destroyAll', () => {
+    const m = new AccountViewManager();
+    m.createAccountWindow('https://x/', asAccountIndex(0));
+    const host = lastWindow();
+    expect(host.listenerCount('resize')).toBeGreaterThan(1);
+    const layoutListeners = host.listenerCount('resize');
+    m.destroyAll();
+    expect(host.listenerCount('resize')).toBeLessThan(layoutListeners);
+    expect(host.listenerCount('maximize')).toBe(0);
+    expect(host.listenerCount('unmaximize')).toBe(0);
   });
 });
 

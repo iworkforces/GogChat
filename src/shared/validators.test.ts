@@ -843,25 +843,3 @@ describe('validateNotificationData', () => {
     ).toThrow(/Notification icon must be/);
   });
 });
-
-describe('validators.ts barrel re-exports', () => {
-  it('should re-export all data validators', () => {
-    expect(typeof validateUnreadCount).toBe('function');
-    expect(typeof validateBoolean).toBe('function');
-    expect(typeof validateString).toBe('function');
-    expect(typeof isSafeObject).toBe('function');
-    expect(typeof sanitizeHTML).toBe('function');
-    expect(typeof validatePasskeyFailureData).toBe('function');
-    expect(typeof validateNotificationData).toBe('function');
-  });
-
-  it('should re-export all URL validators', () => {
-    expect(typeof validateFaviconURL).toBe('function');
-    expect(typeof validateExternalURL).toBe('function');
-    expect(typeof validateAppleSystemPreferencesURL).toBe('function');
-    expect(typeof isWhitelistedHost).toBe('function');
-    expect(typeof validateDeepLinkURL).toBe('function');
-    expect(typeof isAuthenticatedChatUrl).toBe('function');
-    expect(typeof isGoogleAuthUrl).toBe('function');
-  });
-});

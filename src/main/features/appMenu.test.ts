@@ -33,6 +33,14 @@ vi.mock('electron-log', () => ({
   default: { log: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+vi.mock('../utils/account/exitAfterAccountWindows.js', () => ({
+  exitAppAfterSavingWindows: vi.fn(async () => {
+    const { app } = await import('electron');
+    app.exit();
+  }),
+  persistAccountWindowsBeforeExit: vi.fn(async () => undefined),
+}));
+
 const { mockAboutHandler, mockAutoLaunchInstance, mockAutoLaunchSupport, mockToggleGuardHandler } =
   vi.hoisted(() => ({
     mockAboutHandler: vi.fn(),
@@ -164,6 +172,10 @@ vi.mock('../utils/platform/accountNotificationIdentity.js', () => ({
 }));
 
 import appMenu from './appMenu';
+import {
+  exitAppAfterSavingWindows,
+  persistAccountWindowsBeforeExit,
+} from '../utils/account/exitAfterAccountWindows.js';
 import { _getMenuAction } from './menuActionRegistry';
 import { Menu, app, _dialog, clipboard } from 'electron';
 import store from '../config';
@@ -241,7 +253,7 @@ describe('appMenu', () => {
     expect(window.hide).toHaveBeenCalled();
   });
 
-  it('includes File menu with Quit action', () => {
+  it('includes File menu with Quit action', async () => {
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -250,6 +262,8 @@ describe('appMenu', () => {
     const quit = fileMenu.submenu.find((item: MenuItemConstructorOptions) => item.label === 'Quit');
 
     quit.click();
+    await vi.mocked(exitAppAfterSavingWindows).mock.results.at(-1)?.value;
+    expect(exitAppAfterSavingWindows).toHaveBeenCalledOnce();
     expect(app.exit).toHaveBeenCalled();
   });
 
@@ -466,7 +480,17 @@ describe('appMenu', () => {
     expect(versionItem.enabled).toBe(false);
   });
 
-  it('Relaunch action relaunches without --hidden flag', () => {
+  it('Relaunch action saves windows before relaunching', async () => {
+    const order: string[] = [];
+    vi.mocked(persistAccountWindowsBeforeExit).mockImplementationOnce(async () => {
+      order.push('persist');
+    });
+    vi.mocked(app.relaunch).mockImplementationOnce(() => {
+      order.push('relaunch');
+    });
+    vi.mocked(app.exit).mockImplementationOnce(() => {
+      order.push('exit');
+    });
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -477,7 +501,7 @@ describe('appMenu', () => {
     );
 
     relaunch.click();
-    expect(app.relaunch).toHaveBeenCalled();
-    expect(app.exit).toHaveBeenCalled();
+    await vi.mocked(persistAccountWindowsBeforeExit).mock.results.at(-1)?.value;
+    expect(order).toEqual(['persist', 'relaunch', 'exit']);
   });
 });

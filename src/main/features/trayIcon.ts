@@ -1,8 +1,9 @@
 import type { BrowserWindow, Tray } from 'electron';
-import { app, Menu } from 'electron';
+import { Menu } from 'electron';
 import log from 'electron-log';
 import { setTrayInstance } from '../utils/platform/trayIconState.js';
 import { getPlatformUtils } from '../utils/platform/platformUtils.js';
+import { exitAppAfterSavingWindows } from '../utils/account/exitAfterAccountWindows.js';
 import { getMenuAction } from './menuActionRegistry.js';
 
 // Store tray icon reference for cleanup
@@ -27,10 +28,10 @@ export default (window: BrowserWindow) => {
     }
   };
 
-  const handleQuitClick = () => {
+  const handleQuitClick = (): void => {
     // The running webpage can prevent the app from quitting via window.onbeforeunload handler
-    // So let's use exit() instead of quit()
-    app.exit();
+    // So let's use exit() instead of quit(), after the open windows are saved.
+    void exitAppAfterSavingWindows();
   };
 
   trayIconInstance.setContextMenu(

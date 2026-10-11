@@ -37,7 +37,7 @@
 
 - Utilities may import from `src/shared` freely.
 - Avoid feature-to-feature dependencies via utilities. If a utility starts depending on feature state, move the boundary.
-- Do not create new barrel files; existing local `index.ts` files are legacy conveniences.
+- Do not add barrel files. Import each utility module by its path.
 - Prefer small utility modules over large cross-domain catchalls.
 
 ## Logging scopes

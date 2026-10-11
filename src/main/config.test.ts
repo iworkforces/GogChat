@@ -2,7 +2,100 @@
  * Unit tests for encrypted configuration store
  */
 
+import type * as NodeFs from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { safeStorage } from 'electron';
+
+const fsOps = vi.hoisted(() => {
+  const files = new Map<string, Buffer>();
+  const fakeRoot = '/fake/path/userData';
+  const isFake = (target: unknown): target is string =>
+    typeof target === 'string' && target.startsWith(fakeRoot);
+  const enoent = (target: string): NodeJS.ErrnoException =>
+    Object.assign(new Error(`ENOENT: ${target}`), { code: 'ENOENT' });
+  return {
+    files,
+    isFake,
+    failWrites: false,
+    renameSync: vi.fn<(from: unknown, to: unknown) => void>(),
+    rmSync: vi.fn<(target: unknown, options?: unknown) => void>(),
+    passRename: (..._args: unknown[]): void => undefined,
+    passRemove: (..._args: unknown[]): void => undefined,
+    reset(): void {
+      files.clear();
+      this.failWrites = false;
+    },
+    virtualRename(from: unknown, to: unknown): void {
+      if (!isFake(from) || typeof to !== 'string') return;
+      const data = files.get(from);
+      if (data === undefined) throw enoent(from);
+      files.delete(from);
+      files.set(to, data);
+    },
+    virtualRemove(target: unknown): void {
+      if (!isFake(target)) return;
+      files.delete(target);
+    },
+  };
+});
+
+function installDefaultFsOps(): void {
+  fsOps.renameSync.mockImplementation((from: unknown, to: unknown) => {
+    if (fsOps.isFake(from)) {
+      fsOps.virtualRename(from, to);
+      return;
+    }
+    fsOps.passRename(from, to);
+  });
+  fsOps.rmSync.mockImplementation((target: unknown) => {
+    if (fsOps.isFake(target)) {
+      fsOps.virtualRemove(target);
+      return;
+    }
+    fsOps.passRemove(target);
+  });
+}
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof NodeFs>('node:fs');
+  fsOps.passRename = (...args: unknown[]) => {
+    Reflect.apply(actual.renameSync, actual, args);
+  };
+  fsOps.passRemove = (...args: unknown[]) => {
+    Reflect.apply(actual.rmSync, actual, args);
+  };
+  installDefaultFsOps();
+  return {
+    ...actual,
+    existsSync: (target: unknown) => {
+      if (fsOps.isFake(target)) return fsOps.files.has(target);
+      return actual.existsSync(target as never);
+    },
+    readFileSync: (target: unknown, encoding?: unknown) => {
+      if (fsOps.isFake(target)) {
+        const data = fsOps.files.get(target);
+        if (data === undefined) {
+          throw Object.assign(new Error(`ENOENT: ${String(target)}`), { code: 'ENOENT' });
+        }
+        if (encoding === 'utf8' || encoding === 'utf-8') return data.toString('utf8');
+        return data;
+      }
+      return actual.readFileSync(target as never, encoding as never);
+    },
+    writeFileSync: (target: unknown, data: unknown) => {
+      if (fsOps.isFake(target)) {
+        if (fsOps.failWrites) throw new Error('SafeStorage unavailable');
+        const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        fsOps.files.set(target, buffer);
+        return;
+      }
+      return actual.writeFileSync(target as never, data as never);
+    },
+    renameSync: fsOps.renameSync,
+    rmSync: fsOps.rmSync,
+  };
+});
 
 // Mock electron
 vi.mock('electron', () => ({
@@ -55,8 +148,6 @@ vi.mock('./utils/security/encryptionKey', () => ({
     key: 'test-encryption-key-hex-string',
     migrationPending: false,
   })),
-  needsMigration: vi.fn(async () => false),
-  completeMigration: vi.fn(async () => null),
 }));
 
 // Mock electron-store
@@ -67,7 +158,11 @@ const mockStore = {
   delete: vi.fn(),
   clear: vi.fn(),
   onDidChange: vi.fn(),
-  store: {},
+  store: {} as Record<string, unknown>,
+  constructs: 0,
+  failAt: 0,
+  timeline: [] as string[],
+  opened: [] as unknown[],
 };
 
 // Mock electron-store constructor - must be a proper constructor function
@@ -79,20 +174,86 @@ class MockStore {
   clear = mockStore.clear;
   onDidChange = mockStore.onDidChange;
   store = mockStore.store;
+
+  constructor(options?: { name?: string }) {
+    mockStore.constructs += 1;
+    mockStore.opened.push(options);
+    mockStore.timeline.push(`new:${mockStore.constructs}`);
+    if (mockStore.failAt === mockStore.constructs) {
+      throw new Error('JSON Parse error: Unexpected identifier "O2"');
+    }
+    if (options?.name === 'config.rekey') {
+      fsOps.files.set('/fake/path/userData/config.rekey.json', Buffer.from('{}'));
+    }
+  }
 }
 
 vi.mock('electron-store', () => ({
   default: MockStore,
 }));
 
+function configPaths(): {
+  file: string;
+  backup: string;
+  keyFile: string;
+  keyStaged: string;
+  rekey: string;
+  journal: string;
+} {
+  const root = '/fake/path/userData';
+  const file = join(root, 'config.json');
+  return {
+    file,
+    backup: `${file}.bak`,
+    keyFile: join(root, 'encryption-key.enc'),
+    keyStaged: join(root, 'encryption-key.enc.new'),
+    rekey: join(root, 'config.rekey.json'),
+    journal: join(root, 'rekey.step'),
+  };
+}
+
+function seedUserFile(name: string, contents = 'legacy'): void {
+  fsOps.files.set(join('/fake/path/userData', name), Buffer.from(contents));
+}
+
+function enableSafeStorage(): void {
+  vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true);
+}
+
+function spyConfigFiles(afterRename?: () => void): { restore: () => void } {
+  fsOps.renameSync.mockImplementation((from: unknown, to: unknown) => {
+    mockStore.timeline.push(`rename:${String(from)}>${String(to)}`);
+    afterRename?.();
+    fsOps.virtualRename(from, to);
+  });
+  fsOps.rmSync.mockImplementation((target: unknown) => {
+    if (typeof target === 'string' && fsOps.files.has(target)) {
+      mockStore.timeline.push(`rm:${String(target)}`);
+    }
+    fsOps.virtualRemove(target);
+  });
+  return {
+    restore(): void {
+      installDefaultFsOps();
+    },
+  };
+}
+
 describe('Config Store', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsOps.reset();
+    installDefaultFsOps();
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false);
     // Reset mockStore implementation
     mockStore.get.mockReturnValue(undefined);
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
     // Reset the module to clear singleton state
     vi.resetModules();
   });
@@ -137,10 +298,17 @@ describe('Config Store', () => {
 describe('initializeStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsOps.reset();
+    installDefaultFsOps();
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false);
     mockStore.get.mockReturnValue(undefined);
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
     vi.resetModules();
   });
 
@@ -158,73 +326,66 @@ describe('initializeStore', () => {
     expect(getOrCreateEncryptionKey).toHaveBeenCalledOnce();
   });
 
-  it('should not call needsMigration separately (migrationPending comes from getOrCreateEncryptionKey)', async () => {
-    const { initializeStore } = await import('./config');
-    const { needsMigration } = await import('./utils/security/encryptionKey');
-    await initializeStore();
-    expect(needsMigration).not.toHaveBeenCalled();
-  });
-
   it('should perform migration when getOrCreateEncryptionKey signals migrationPending', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
     });
-    vi.mocked(completeMigration).mockResolvedValue('new-safestorage-key');
+    enableSafeStorage();
     mockStore.store = { app: { autoCheckForUpdates: true } };
+    seedUserFile('config.json');
 
     const { initializeStore } = await import('./config');
     await initializeStore();
 
-    expect(completeMigration).toHaveBeenCalledOnce();
-    // After migration, data should be re-imported via set()
     expect(mockStore.set).toHaveBeenCalledWith('app', { autoCheckForUpdates: true });
+    expect(fsOps.files.has(configPaths().keyFile)).toBe(true);
   });
 
-  it('should continue with legacy store if completeMigration returns null', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
-    const _log = (await import('electron-log')).default;
+  it('continues with the legacy store when SafeStorage is unavailable', async () => {
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
     });
-    vi.mocked(completeMigration).mockResolvedValue(null);
+    seedUserFile('config.json', 'legacy');
 
     const { initializeStore } = await import('./config');
     const store = await initializeStore();
 
     expect(store).toBeDefined();
-    // No data migration when completeMigration returns null
+    expect(mockStore.constructs).toBe(1);
+    expect(fsOps.files.get(configPaths().file)?.toString()).toBe('legacy');
+    expect(fsOps.files.has(configPaths().keyFile)).toBe(false);
     expect(mockStore.set).not.toHaveBeenCalledWith('app', expect.anything());
   });
 
   it('should handle migration error gracefully and continue with legacy key', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     const log = (await import('electron-log')).default;
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
     });
-    vi.mocked(completeMigration).mockRejectedValue(new Error('SafeStorage unavailable'));
+    enableSafeStorage();
+    fsOps.failWrites = true;
+    seedUserFile('config.json', 'legacy');
 
     const { initializeStore } = await import('./config');
     const store = await initializeStore();
 
-    // Should still return a store (the legacy one)
     expect(store).toBeDefined();
+    expect(mockStore.constructs).toBe(1);
+    expect(fsOps.files.get(configPaths().file)?.toString()).toBe('legacy');
     expect(log.error).toHaveBeenCalledWith(
       '[Config] Migration failed, continuing with legacy key:',
-      expect.any(Error)
+      expect.objectContaining({ message: 'SafeStorage unavailable' })
     );
   });
 
   it('should skip migration when migrationPending is false', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: false,
@@ -233,17 +394,18 @@ describe('initializeStore', () => {
     const { initializeStore } = await import('./config');
     await initializeStore();
 
-    expect(completeMigration).not.toHaveBeenCalled();
+    expect(mockStore.constructs).toBe(1);
+    expect(fsOps.files.has(configPaths().keyFile)).toBe(false);
   });
 
   it('should migrate all data entries from old store to new store', async () => {
-    const { getOrCreateEncryptionKey, completeMigration } =
-      await import('./utils/security/encryptionKey');
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
     vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
       key: 'test-encryption-key-hex-string',
       migrationPending: true,
     });
-    vi.mocked(completeMigration).mockResolvedValue('new-key');
+    enableSafeStorage();
+    seedUserFile('config.json');
     mockStore.store = {
       window: { bounds: { x: 10, y: 20, width: 1024, height: 768 }, isMaximized: true },
       app: { autoCheckForUpdates: false },
@@ -267,6 +429,224 @@ describe('initializeStore', () => {
       expect.objectContaining({ cacheVersion: '1.0.0' })
     );
   });
+
+  it('writes the new ciphertext before it replaces the legacy file', async () => {
+    const fsSpies = spyConfigFiles();
+    try {
+      const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+      const log = (await import('electron-log')).default;
+      vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+        key: 'test-encryption-key-hex-string',
+        migrationPending: true,
+      });
+      enableSafeStorage();
+      seedUserFile('config.json', 'legacy');
+      mockStore.store = {
+        app: { autoCheckForUpdates: true },
+        __internal__: { migrations: { version: '0.0.0' } },
+      };
+
+      const { initializeStore } = await import('./config');
+      await initializeStore();
+
+      const { file, backup, keyFile, keyStaged, rekey, journal } = configPaths();
+      expect(mockStore.timeline).toEqual([
+        'new:1',
+        'new:2',
+        `rename:${file}>${backup}`,
+        `rename:${rekey}>${file}`,
+        `rename:${keyStaged}>${keyFile}`,
+        `rm:${backup}`,
+        `rm:${journal}`,
+        'new:3',
+      ]);
+      const opened = mockStore.opened[1] as { encryptionKey?: string; name?: string };
+      expect(opened.name).toBe('config.rekey');
+      expect(opened.encryptionKey).toMatch(/^[0-9a-f]{64}$/);
+      expect(mockStore.opened[1]).toMatchObject({ clearInvalidConfig: true });
+      expect(mockStore.opened[2]).toMatchObject({
+        cwd: '/fake/path/userData',
+        name: 'config',
+        encryptionKey: opened.encryptionKey,
+        clearInvalidConfig: true,
+      });
+      expect(safeStorage.encryptString).toHaveBeenCalledWith(opened.encryptionKey);
+      expect(fsOps.files.has(file)).toBe(true);
+      expect(fsOps.files.has(keyFile)).toBe(true);
+      expect(fsOps.files.has(backup)).toBe(false);
+      expect(fsOps.files.has(journal)).toBe(false);
+      expect(fsOps.files.has(keyStaged)).toBe(false);
+      expect(mockStore.set).toHaveBeenCalledWith('app', { autoCheckForUpdates: true });
+      expect(mockStore.set).not.toHaveBeenCalledWith('__internal__', expect.anything());
+      expect(log.info).toHaveBeenCalledWith(
+        '[Config] Starting migration from legacy to SafeStorage encryption'
+      );
+      expect(log.info).toHaveBeenCalledWith(
+        '[Config] Migration to SafeStorage encryption complete'
+      );
+    } finally {
+      fsSpies.restore();
+    }
+  });
+
+  it('leaves the legacy file in place when a key file already exists', async () => {
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+    vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+      key: 'test-encryption-key-hex-string',
+      migrationPending: true,
+    });
+    enableSafeStorage();
+    seedUserFile('config.json', 'legacy');
+    seedUserFile('encryption-key.enc', 'existing-key');
+
+    const { initializeStore } = await import('./config');
+    const store = await initializeStore();
+
+    const { file, backup, keyFile } = configPaths();
+    expect(store).toBeDefined();
+    expect(mockStore.constructs).toBe(1);
+    expect(fsOps.files.get(file)?.toString()).toBe('legacy');
+    expect(fsOps.files.has(backup)).toBe(false);
+    expect(fsOps.files.get(keyFile)?.toString()).toBe('existing-key');
+    expect(mockStore.set).not.toHaveBeenCalledWith('app', expect.anything());
+  });
+
+  it('drops the staged key when the rekeyed store cannot open', async () => {
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+    const log = (await import('electron-log')).default;
+    vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+      key: 'test-encryption-key-hex-string',
+      migrationPending: true,
+    });
+    enableSafeStorage();
+    seedUserFile('config.json', 'legacy');
+    mockStore.failAt = 2;
+
+    const { initializeStore } = await import('./config');
+    const store = await initializeStore();
+
+    const { file, backup, keyFile, keyStaged } = configPaths();
+    expect(store).toBeDefined();
+    expect(mockStore.constructs).toBe(2);
+    expect(fsOps.files.get(file)?.toString()).toBe('legacy');
+    expect(fsOps.files.has(backup)).toBe(false);
+    expect(fsOps.files.has(keyFile)).toBe(false);
+    expect(fsOps.files.has(keyStaged)).toBe(false);
+    expect(log.error).toHaveBeenCalledWith(
+      '[Config] Migration failed, continuing with legacy key:',
+      expect.objectContaining({ message: 'JSON Parse error: Unexpected identifier "O2"' })
+    );
+  });
+
+  it('still imports data when the legacy config file is already absent', async () => {
+    const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+    vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+      key: 'test-encryption-key-hex-string',
+      migrationPending: true,
+    });
+    enableSafeStorage();
+    mockStore.store = { app: { autoCheckForUpdates: true } };
+
+    const { initializeStore } = await import('./config');
+    await initializeStore();
+
+    const { file, keyFile } = configPaths();
+    expect(mockStore.constructs).toBe(3);
+    expect(mockStore.set).toHaveBeenCalledWith('app', { autoCheckForUpdates: true });
+    expect(fsOps.files.has(file)).toBe(true);
+    expect(fsOps.files.has(keyFile)).toBe(true);
+  });
+
+  it('restores a crashed rekey before the store opens', async () => {
+    const { file, backup, keyFile } = configPaths();
+    fsOps.files.set(backup, Buffer.from('legacy'));
+    fsOps.files.set(keyFile, Buffer.from('new-key'));
+
+    const { initializeStore } = await import('./config');
+    await initializeStore();
+
+    expect(fsOps.files.get(file)?.toString()).toBe('legacy');
+    expect(fsOps.files.has(backup)).toBe(false);
+    expect(fsOps.files.has(keyFile)).toBe(false);
+    expect(mockStore.constructs).toBe(1);
+  });
+
+  it.each([
+    ['EACCES', Object.assign(new Error('busy'), { code: 'EACCES' })],
+    ['a plain Error', new Error('no-code')],
+    ['a string', 'boom'],
+    ['null', null],
+  ])('aborts migration when moving the legacy config fails with %s', async (_label, thrown) => {
+    const fsSpies = spyConfigFiles(() => {
+      throw thrown;
+    });
+    try {
+      const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+      const log = (await import('electron-log')).default;
+      vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+        key: 'test-encryption-key-hex-string',
+        migrationPending: true,
+      });
+      enableSafeStorage();
+      seedUserFile('config.json', 'legacy');
+
+      const { initializeStore } = await import('./config');
+      const store = await initializeStore();
+
+      const { file, keyFile, keyStaged } = configPaths();
+      expect(store).toBeDefined();
+      expect(mockStore.constructs).toBe(2);
+      expect(fsOps.files.get(file)?.toString()).toBe('legacy');
+      expect(fsOps.files.has(keyFile)).toBe(false);
+      expect(fsOps.files.has(keyStaged)).toBe(false);
+      expect(log.error).toHaveBeenCalledWith(
+        '[Config] Migration failed, continuing with legacy key:',
+        thrown
+      );
+    } finally {
+      fsSpies.restore();
+    }
+  });
+
+  it('logs a failed restore and drops the staged key', async () => {
+    let renames = 0;
+    const moveError = Object.assign(new Error('move failed'), { code: 'EIO' });
+    const restoreError = Object.assign(new Error('restore failed'), { code: 'EIO' });
+    const fsSpies = spyConfigFiles(() => {
+      renames += 1;
+      if (renames === 2) throw moveError;
+      if (renames === 3) throw restoreError;
+    });
+    try {
+      const { getOrCreateEncryptionKey } = await import('./utils/security/encryptionKey');
+      const log = (await import('electron-log')).default;
+      vi.mocked(getOrCreateEncryptionKey).mockResolvedValue({
+        key: 'test-encryption-key-hex-string',
+        migrationPending: true,
+      });
+      enableSafeStorage();
+      seedUserFile('config.json', 'legacy');
+
+      const { initializeStore } = await import('./config');
+      const store = await initializeStore();
+
+      const { backup, keyFile, keyStaged } = configPaths();
+      expect(store).toBeDefined();
+      expect(fsOps.files.has(backup)).toBe(true);
+      expect(fsOps.files.has(keyFile)).toBe(false);
+      expect(fsOps.files.has(keyStaged)).toBe(false);
+      expect(log.error).toHaveBeenCalledWith(
+        '[Config] Failed to restore legacy config:',
+        expect.objectContaining({ message: 'restore failed' })
+      );
+      expect(log.error).toHaveBeenCalledWith(
+        '[Config] Migration failed, continuing with legacy key:',
+        moveError
+      );
+    } finally {
+      fsSpies.restore();
+    }
+  });
 });
 
 describe('validateAndUpdateCacheVersion', () => {
@@ -276,6 +656,13 @@ describe('validateAndUpdateCacheVersion', () => {
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
+    fsOps.reset();
+    installDefaultFsOps();
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false);
     // Reset isCachedStore mock to default (false) in case a prior test changed it
     const { isCachedStore } = await import('./utils/config/configCache');
     vi.mocked(isCachedStore).mockReturnValue(false);
@@ -430,6 +817,10 @@ describe('getStore', () => {
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
     vi.resetModules();
   });
 
@@ -457,6 +848,10 @@ describe('Store Proxy', () => {
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
     vi.resetModules();
   });
 
@@ -565,6 +960,10 @@ describe('Cache layer behavior in config', () => {
     mockStore.set.mockReturnValue(undefined);
     mockStore.has.mockReturnValue(false);
     mockStore.store = {};
+    mockStore.constructs = 0;
+    mockStore.failAt = 0;
+    mockStore.timeline = [];
+    mockStore.opened = [];
     vi.resetModules();
   });
 

@@ -2,7 +2,6 @@
  * Common IPC Validators
  *
  * Reusable validator functions for IPC message payloads.
- * Extracted from ipcHelper.ts for focused module responsibility.
  */
 
 import { IPCError } from '../lifecycle/errors.js';

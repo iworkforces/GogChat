@@ -66,7 +66,11 @@ export const DEFERRED_FEATURES = [
     description: 'Window state persistence',
     init: async ({ accountWindowManager }) => {
       const module = await import('../features/windowState.js');
-      module.default(accountWindowManager ? { accountWindowManager } : {});
+      await module.default(accountWindowManager ? { accountWindowManager } : {});
+    },
+    cleanup: async () => {
+      const module = await import('../features/windowState.js');
+      module.cleanupWindowState();
     },
   },
   {
