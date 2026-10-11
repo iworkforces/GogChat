@@ -6,7 +6,7 @@
  * lifecycle: holding cleanup references and exposing cleanupBadgeIcon().
  */
 
-import type { BrowserWindow, Tray } from 'electron';
+import type { BrowserWindow } from 'electron';
 import log from 'electron-log';
 import { toErrorMessage } from '../utils/lifecycle/errorUtils.js';
 import { setupBadgeHandlers } from '../utils/platform/badgeHelpers.js';
@@ -14,8 +14,8 @@ import type { BadgeHandlerCleanups } from '../utils/platform/badgeHelpers.js';
 
 let handlerCleanups: BadgeHandlerCleanups | null = null;
 
-export default (window: BrowserWindow, trayIcon: Tray): void => {
-  handlerCleanups = setupBadgeHandlers(window, trayIcon);
+export default (window: BrowserWindow): void => {
+  handlerCleanups = setupBadgeHandlers(window);
 };
 
 /**

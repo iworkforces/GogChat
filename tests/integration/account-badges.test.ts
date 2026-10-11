@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Conf from 'conf';
-import type { IpcMainEvent, NativeImage, Tray, WebContents } from 'electron';
+import type { IpcMainEvent, WebContents } from 'electron';
 import { schema } from '../../src/main/utils/config/configSchema.js';
 import { APP_IDENTITY } from '../../src/shared/appIdentity.js';
 import { IPC_CHANNELS } from '../../src/shared/constants.js';
@@ -30,9 +30,6 @@ const badgeFavicon = 'https://ssl.gstatic.com/chat/favicon_badge.png';
 
 interface Presentation {
   readonly count: number;
-  readonly image: string;
-  readonly normalImage: string;
-  readonly unreadImage: string;
   readonly indices: readonly AccountIndex[];
   readonly senderIds: Readonly<Record<string, number>>;
   readonly dehydrated: readonly AccountIndex[];
@@ -57,8 +54,6 @@ interface BadgeProbe {
   readonly dispatch: (operation: Operation) => Promise<Presentation>;
   readonly advanceRateWindow: () => void;
   readonly dispose: () => void;
-  tray?: Tray;
-  image: string;
 }
 
 async function evaluateMain<Result>(
@@ -121,20 +116,8 @@ async function installProbe(app: LaunchedElectronApp, backend: AccountBackendKin
     ).href;
     const retired = new Map<AccountIndex, WebContents>();
     const auxiliaryWindows: Electron.BrowserWindow[] = [];
-    const originalSetImage = electron.Tray.prototype.setImage;
     const originalDateNow = Date.now;
     let now = originalDateNow();
-    const normalImage = electron.nativeImage
-      .createFromPath(path.join(process.cwd(), 'resources/icons/tray/iconTemplate.png'))
-      .toPNG()
-      .toString('base64');
-    const unreadImage = electron.nativeImage
-      .createFromPath(path.join(process.cwd(), 'resources/icons/tray/iconUnreadTemplate.png'))
-      .toPNG()
-      .toString('base64');
-    if (!normalImage || !unreadImage || normalImage === unreadImage) {
-      throw new Error('Native tray fixtures must contain distinct existing images');
-    }
 
     const currentSender = (index: AccountIndex): WebContents => {
       const sender = manager.getAccountWebContents(index);
@@ -185,9 +168,6 @@ async function installProbe(app: LaunchedElectronApp, backend: AccountBackendKin
     };
     const snapshot = (): Presentation => ({
       count: electron.app.getBadgeCount(),
-      image: probe.image,
-      normalImage,
-      unreadImage,
       indices: manager.listAccountIndices(),
       senderIds: Object.fromEntries(
         manager
@@ -198,7 +178,6 @@ async function installProbe(app: LaunchedElectronApp, backend: AccountBackendKin
     });
     const probe: BadgeProbe = {
       manager,
-      image: '',
       snapshot,
       advanceRateWindow: () => {
         now += 1000;
@@ -293,20 +272,11 @@ async function installProbe(app: LaunchedElectronApp, backend: AccountBackendKin
             }
           } finally {
             Date.now = originalDateNow;
-            electron.Tray.prototype.setImage = originalSetImage;
-            if (probe.tray && !probe.tray.isDestroyed()) probe.tray.destroy();
             Reflect.deleteProperty(globalThis, '__accountBadgeProbe');
             Reflect.deleteProperty(globalThis, '__accountBadgeChannels');
           }
         }
       },
-    };
-    electron.Tray.prototype.setImage = function (image: NativeImage | string): void {
-      probe.tray = this;
-      probe.image = (typeof image === 'string' ? electron.nativeImage.createFromPath(image) : image)
-        .toPNG()
-        .toString('base64');
-      originalSetImage.call(this, image);
     };
     Reflect.set(globalThis, '__accountBadgeProbe', probe);
     Date.now = () => now;
@@ -315,7 +285,6 @@ async function installProbe(app: LaunchedElectronApp, backend: AccountBackendKin
   expect(actualBackend).toEqual([backend]);
   const initial = await operate(app, { kind: 'unread', index: asAccountIndex(0), value: 1 });
   expect(initial.count).toBe(1);
-  expect(initial.image).toBe(initial.unreadImage);
   await app.evaluate(() => {
     const probe: BadgeProbe = Reflect.get(globalThis, '__accountBadgeProbe');
     probe.advanceRateWindow();
@@ -329,16 +298,7 @@ async function operate(app: LaunchedElectronApp, operation: Operation): Promise<
       return probe.dispatch(input);
     }, operation)
   );
-  const { image, normalImage, unreadImage, ...values } = presentation;
-  console.info(
-    'NATIVE_BADGE_QA',
-    JSON.stringify({
-      operation,
-      ...values,
-      trayUnread: image === unreadImage,
-      trayNormal: image === normalImage,
-    })
-  );
+  console.info('NATIVE_BADGE_QA', JSON.stringify({ operation, ...presentation }));
   return presentation;
 }
 
@@ -405,7 +365,7 @@ for (const backend of ['browser-window', 'web-contents-view'] satisfies AccountB
   test.describe(`Native account badges: ${backend}`, () => {
     test.skip(
       process.platform !== 'darwin',
-      'Native Dock and template tray evidence is macOS-only'
+      'Native Dock badge evidence is macOS-only'
     );
 
     test('keeps aggregate native badges when live renderers interleave counts and favicons', async () => {
@@ -416,7 +376,6 @@ for (const backend of ['browser-window', 'web-contents-view'] satisfies AccountB
         expect((await operate(app, { kind: 'unread', index: first, value: 60 })).count).toBe(60);
         const capped = await operate(app, { kind: 'unread', index: second, value: 60 });
         expect(capped.count).toBe(99);
-        expect(capped.image).toBe(capped.unreadImage);
         await operate(app, { kind: 'favicon', index: first, value: badgeFavicon });
         const interleaved = await operate(app, {
           kind: 'favicon',
@@ -424,12 +383,10 @@ for (const backend of ['browser-window', 'web-contents-view'] satisfies AccountB
           value: normalFavicon,
         });
         expect(interleaved.count).toBe(99);
-        expect(interleaved.image).toBe(interleaved.unreadImage);
         await operate(app, { kind: 'unread', index: first, value: 60 });
         expect((await operate(app, { kind: 'unread', index: second, value: 0 })).count).toBe(60);
         const cleared = await operate(app, { kind: 'unread', index: first, value: 0 });
         expect(cleared.count).toBe(0);
-        expect(cleared.image).toBe(cleared.normalImage);
       });
     });
 
@@ -469,7 +426,6 @@ for (const backend of ['browser-window', 'web-contents-view'] satisfies AccountB
         const destroyed = await operate(app, { kind: 'destroy-all' });
         expect(destroyed.indices).toEqual([]);
         expect(destroyed.count).toBe(0);
-        expect(destroyed.image).toBe(destroyed.normalImage);
       });
     });
 
@@ -481,13 +437,9 @@ for (const backend of ['browser-window', 'web-contents-view'] satisfies AccountB
         expect(baseline.count).toBe(7);
         const unmapped = await operate(app, { kind: 'unmapped' });
         expect(unmapped.count).toBe(7);
-        expect(unmapped.image).toBe(baseline.unreadImage);
         const closed = await operate(app, { kind: 'native-close', index: second });
         expect(closed.count).toBe(backend === 'browser-window' ? 1 : 0);
         expect(closed.indices).toEqual(backend === 'browser-window' ? [asAccountIndex(0)] : []);
-        expect(closed.image).toBe(
-          backend === 'browser-window' ? closed.unreadImage : closed.normalImage
-        );
       });
     });
   });

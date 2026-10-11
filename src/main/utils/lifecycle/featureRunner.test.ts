@@ -131,7 +131,7 @@ describe('featureRunner', () => {
         security: [[makeSpec({ name: 'a', phase: 'security', init })]],
       };
       const runner = await loadRunnerWithPlan(plan);
-      const ctx: FeatureContext = { trayIcon: null };
+      const ctx: FeatureContext = {};
 
       await runner.runPhase('security', ctx);
 

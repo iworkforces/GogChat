@@ -32,6 +32,7 @@ export const FEATURE_PLAN: Readonly<Record<FeaturePriority, readonly (readonly F
     deferred: [
       [
         get('aboutPanel'),
+        get('badgeIcons'),
         get('bootstrapPromotion'),
         get('openAtLogin'),
         get('appUpdates'),
@@ -39,11 +40,12 @@ export const FEATURE_PLAN: Readonly<Record<FeaturePriority, readonly (readonly F
         get('enforceMacOSAppLocation'),
         get('passkeySupport'),
         get('handleNotification'),
+        get('closeToTray'),
         get('contextMenu'),
         get('inOnline'),
       ],
-      [get('trayIcon'), get('windowState'), get('externalLinks')],
-      [get('badgeIcons'), get('appMenu'), get('closeToTray')],
+      [get('windowState'), get('externalLinks')],
+      [get('appMenu')],
       [get('cdpTelemetry')],
     ],
   };
