@@ -24,7 +24,6 @@ import type { IAccountWindowManager } from '../../../shared/types/window.js';
 const mockSetBadgeCount = vi.fn();
 const mockPlatformState = vi.hoisted(() => ({
   supportsDockBadge: true,
-  useTemplateTrayIcon: true,
 }));
 vi.mock('electron', () => ({
   app: { setBadgeCount: mockSetBadgeCount },
@@ -47,22 +46,12 @@ vi.mock('electron-log', () => ({
   },
 }));
 
-const mockGetIcon = vi.fn().mockReturnValue('/fake/icon.png');
-vi.mock('./iconCache.js', () => ({
-  getIconCache: () => ({ getIcon: mockGetIcon }),
-}));
-
 const mockIsAccountVisible = vi.fn(() => true);
 const mockGetAccountWindowManager = vi.fn(() => ({
   isAccountVisible: (...args: unknown[]) => mockIsAccountVisible(...args),
 }));
 vi.mock('../account/accountWindowManager.js', () => ({
   getAccountWindowManager: (...args: unknown[]) => mockGetAccountWindowManager(...args),
-}));
-
-const mockSetTrayUnread = vi.fn();
-vi.mock('./trayIconState.js', () => ({
-  setTrayUnread: mockSetTrayUnread,
 }));
 
 vi.mock('./platformDetection.js', () => ({
@@ -118,7 +107,6 @@ vi.mock('./nativeNotification.js', () => ({
     opts.nextCount > opts.previousCount &&
     opts.nextCount > 0,
   clampBadgeDisplayCount: (count: number) => (count <= 0 ? 0 : count > 99 ? 99 : Math.floor(count)),
-  UNREAD_DELTA_NOTIFICATION_TAG: 'gogchat-unread-delta',
 }));
 vi.mock('./accountNotificationIdentity.js', () => ({
   resolveAccountIndexFromIpcEvent: (...args: unknown[]) => mockResolveAccount(...args),
@@ -146,10 +134,6 @@ function fakeWindow(overrides: { isFocused?: boolean } = {}) {
     isFocused: vi.fn().mockReturnValue(overrides.isFocused ?? false),
   } as unknown as Electron.BrowserWindow;
 }
-function fakeTray() {
-  return { setImage: vi.fn() } as unknown as Electron.Tray;
-}
-
 const liveWebContents = new Map<AccountIndex, Electron.WebContents>();
 function eventForAccount(accountIndex = 0): IpcMainEvent {
   const sender = liveWebContents.get(asAccountIndex(accountIndex));
@@ -208,8 +192,6 @@ describe('badgeHelpers (config wiring)', () => {
     mockRegisterFastHandler.mockClear();
     mockRegisterFastHandler.mockReturnValue(vi.fn());
     mockSetBadgeCount.mockClear();
-    mockGetIcon.mockClear().mockReturnValue('/fake/icon.png');
-    mockSetTrayUnread.mockClear();
     mockShowNativeNotification.mockClear();
     mockWasBridgeRecently.mockClear();
     mockWasBridgeRecently.mockReturnValue(false);
@@ -220,7 +202,6 @@ describe('badgeHelpers (config wiring)', () => {
     mockBuildPayload.mockClear();
     mockConfigGet.mockReturnValue(false);
     mockPlatformState.supportsDockBadge = true;
-    mockPlatformState.useTemplateTrayIcon = true;
   });
 
   afterEach(() => {
@@ -260,7 +241,7 @@ describe('badgeHelpers (config wiring)', () => {
   describe('setupBadgeHandlers', () => {
     it('registers FAVICON_CHANGED handler with validator and rate limit', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       expect(mockRegisterFastHandler).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -274,7 +255,7 @@ describe('badgeHelpers (config wiring)', () => {
 
     it('registers UNREAD_COUNT handler with validator and rate limit', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       expect(mockRegisterFastHandler).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -294,7 +275,7 @@ describe('badgeHelpers (config wiring)', () => {
         .mockReturnValueOnce(unreadCleanupFn);
 
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      const { faviconCleanup, unreadCleanup } = setupBadgeHandlers(fakeWindow(), fakeTray());
+      const { faviconCleanup, unreadCleanup } = setupBadgeHandlers(fakeWindow());
 
       expect(faviconCleanup).toBe(faviconCleanupFn);
       expect(unreadCleanup).toBe(unreadCleanupFn);
@@ -302,13 +283,13 @@ describe('badgeHelpers (config wiring)', () => {
 
     it('short-circuits identical consecutive FAVICON_CHANGED payloads (inline cache)', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       const faviconCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
       )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
 
-      mockSetTrayUnread.mockClear();
+      mockSetBadgeCount.mockClear();
       faviconCfg.handler(
         'https://mail.google.com/favicon_chat_new_notif_r2.ico',
         eventForAccount()
@@ -322,13 +303,13 @@ describe('badgeHelpers (config wiring)', () => {
         eventForAccount()
       );
 
-      // setTrayUnread runs inside the handler body — should be called once
-      expect(mockSetTrayUnread).toHaveBeenCalledTimes(1);
+      expect(mockSetBadgeCount).toHaveBeenCalledTimes(1);
+      expect(mockSetBadgeCount).toHaveBeenCalledWith(0);
     });
 
     it('short-circuits identical consecutive UNREAD_COUNT payloads (inline cache)', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -342,9 +323,9 @@ describe('badgeHelpers (config wiring)', () => {
       expect(mockSetBadgeCount).toHaveBeenCalledWith(7);
     });
 
-    it('handler updates dock badge and tray when invoked', async () => {
+    it('handler updates dock badge when invoked', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -352,19 +333,18 @@ describe('badgeHelpers (config wiring)', () => {
       unreadCfg.handler(5, eventForAccount());
 
       expect(mockSetBadgeCount).toHaveBeenCalledWith(5);
-      expect(mockSetTrayUnread).toHaveBeenCalledWith(true);
     });
 
-    it('handler clears tray unread when count is 0', async () => {
+    it('handler clears the dock badge when count is 0', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, event: IpcMainEvent) => void };
       unreadCfg.handler(0, eventForAccount());
 
-      expect(mockSetTrayUnread).toHaveBeenCalledWith(false);
+      expect(mockSetBadgeCount).toHaveBeenCalledWith(0);
     });
 
     it('retains an unknown-count badge favicon when another live account reports normal', async () => {
@@ -383,7 +363,7 @@ describe('badgeHelpers (config wiring)', () => {
           ],
         })
       );
-      const cleanups = setupBadgeHandlers(fakeWindow(), fakeTray());
+      const cleanups = setupBadgeHandlers(fakeWindow());
       const config = asType<{ handler: (value: string, event: IpcMainEvent) => void }>(
         mockRegisterFastHandler.mock.calls.find(([cfg]) => cfg.channel === 'faviconChanged')?.[0]
       );
@@ -397,7 +377,7 @@ describe('badgeHelpers (config wiring)', () => {
         asType<IpcMainEvent>({ sender: second })
       );
 
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
       for (const cleanup of Object.values(cleanups)) cleanup();
       hooks.clearAccountWebContentsHooksForTests();
     });
@@ -405,7 +385,7 @@ describe('badgeHelpers (config wiring)', () => {
     it('does not show unread-delta notification when flag is off', async () => {
       mockConfigGet.mockReturnValue(false);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: false }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: false }));
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -420,7 +400,7 @@ describe('badgeHelpers (config wiring)', () => {
     it('short-circuits when same account reports the same count again', async () => {
       mockResolveAccount.mockReturnValue(0);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
@@ -430,28 +410,11 @@ describe('badgeHelpers (config wiring)', () => {
       expect(mockSetBadgeCount).toHaveBeenCalledTimes(1);
     });
 
-    it('updates non-template tray icon when favicon type changes', async () => {
-      mockPlatformState.useTemplateTrayIcon = false;
-      const tray = fakeTray();
-      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), tray);
-      const faviconCfg = mockRegisterFastHandler.mock.calls.find(
-        ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
-      faviconCfg.handler(
-        'https://mail.google.com/favicon_chat_new_notif_r2.ico',
-        eventForAccount()
-      );
-      expect(tray.setImage).toHaveBeenCalled();
-      mockPlatformState.useTemplateTrayIcon = true;
-    });
-
     it('shows unread-delta notification on unfocused increase when enabled', async () => {
       mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
       const win = fakeWindow({ isFocused: false });
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(win, fakeTray());
+      setupBadgeHandlers(win);
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -488,7 +451,7 @@ describe('badgeHelpers (config wiring)', () => {
       mockResolveAccount.mockReturnValueOnce(0).mockReturnValueOnce(1);
       const { setupBadgeHandlers, sumAccountUnreadCounts, updateBadgeIcon } =
         await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -516,7 +479,7 @@ describe('badgeHelpers (config wiring)', () => {
       mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
       mockIsAccountVisible.mockReturnValue(true);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: true }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: true }));
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -532,7 +495,7 @@ describe('badgeHelpers (config wiring)', () => {
       mockIsAccountVisible.mockReturnValue(false);
       mockResolveAccount.mockReturnValue(1);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: true }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: true }));
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -551,7 +514,7 @@ describe('badgeHelpers (config wiring)', () => {
       mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
       mockWasBridgeRecently.mockReturnValue(true);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: false }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: false }));
 
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
@@ -568,7 +531,7 @@ describe('badgeHelpers (config wiring)', () => {
         throw new Error('show fail');
       });
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: false }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: false }));
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
@@ -579,23 +542,23 @@ describe('badgeHelpers (config wiring)', () => {
       mockShowNativeNotification.mockReturnValue(true);
     });
 
-    it('clears tray unread when total becomes zero', async () => {
+    it('clears the dock badge when the total becomes zero', async () => {
       mockResolveAccount.mockReturnValue(0);
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
       unreadCfg.handler(2, eventForAccount());
       unreadCfg.handler(0, eventForAccount());
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
     });
 
     it('rejects an unmapped account without badge or unread-delta effects', async () => {
       mockResolveAccount.mockReturnValue(null);
       mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow({ isFocused: true }), fakeTray());
+      setupBadgeHandlers(fakeWindow({ isFocused: true }));
       const unreadCfg = mockRegisterFastHandler.mock.calls.find(
         ([cfg]) => (cfg as { channel: string }).channel === 'unreadCount'
       )?.[0] as { handler: (v: number, e?: unknown) => void };
@@ -604,82 +567,32 @@ describe('badgeHelpers (config wiring)', () => {
       unreadCfg.handler(4, eventForAccount());
       expect(mockShowNativeNotification).not.toHaveBeenCalled();
       expect(mockSetBadgeCount).not.toHaveBeenCalled();
-      expect(mockSetTrayUnread).not.toHaveBeenCalled();
     });
 
-    it('skips redundant setImage when tray type unchanged on non-template icons', async () => {
-      mockPlatformState.useTemplateTrayIcon = false;
-      const tray = fakeTray();
+    it('keeps the dock badge on unread totals while favicons change', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), tray);
-      const faviconCfg = mockRegisterFastHandler.mock.calls.find(
-        ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
-      vi.mocked(tray.setImage).mockClear();
-      faviconCfg.handler(
-        'https://mail.google.com/favicon_chat_r2.ico?revision=2',
-        eventForAccount()
-      );
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
-      expect(tray.setImage).not.toHaveBeenCalled();
-      mockPlatformState.useTemplateTrayIcon = true;
+      setupBadgeHandlers(fakeWindow());
+      const favicon = capturedHandler<string>('faviconChanged');
+      const unread = capturedHandler<number>('unreadCount');
+      const badge = 'https://mail.google.com/favicon_chat_new_notif_r2.ico';
+      const normal = 'https://mail.google.com/favicon_chat_r2.ico';
+
+      favicon(badge, eventForAccount());
+      unread(0, eventForAccount());
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
+      favicon(badge, eventForAccount(2));
+      favicon(normal, eventForAccount());
+      unread(0, eventForAccount());
+      unread(7, eventForAccount(2));
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(7);
+      unread(0, eventForAccount(2));
+
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
     });
-
-    it('uses the favicon icon variant on Windows-style tray icons without template unread toggles', async () => {
-      mockPlatformState.useTemplateTrayIcon = false;
-      const tray = fakeTray();
-
-      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), tray);
-
-      const faviconCfg = mockRegisterFastHandler.mock.calls.find(
-        ([cfg]) => (cfg as { channel: string }).channel === 'faviconChanged'
-      )?.[0] as { handler: (v: string, event: IpcMainEvent) => void };
-      faviconCfg.handler('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
-
-      expect(mockSetTrayUnread).not.toHaveBeenCalled();
-      expect(mockGetIcon).toHaveBeenCalledWith(expect.stringMatching(/^resources\/icons\//));
-      expect(tray.setImage).toHaveBeenCalledWith('/fake/icon.png');
-    });
-
-    it.each([true, false])(
-      'uses aggregate count precedence with template tray = %s',
-      async (template) => {
-        mockPlatformState.useTemplateTrayIcon = template;
-        const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-        const tray = fakeTray();
-        setupBadgeHandlers(fakeWindow(), tray);
-        const favicon = capturedHandler<string>('faviconChanged');
-        const unread = capturedHandler<number>('unreadCount');
-        const badge = 'https://mail.google.com/favicon_chat_new_notif_r2.ico';
-        const normal = 'https://mail.google.com/favicon_chat_r2.ico';
-
-        favicon(badge, eventForAccount());
-        unread(0, eventForAccount());
-        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
-        else expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
-        favicon(badge, eventForAccount(2));
-        favicon(normal, eventForAccount());
-        unread(0, eventForAccount());
-        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
-        else expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/badge/16.png');
-        unread(7, eventForAccount(2));
-        unread(0, eventForAccount(2));
-
-        expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
-        if (template) expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
-        else {
-          expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
-          expect(mockSetTrayUnread).not.toHaveBeenCalled();
-          expect(tray.setImage).toHaveBeenLastCalledWith('/fake/icon.png');
-        }
-      }
-    );
 
     it('deduplicates equal counts per account rather than across interleaved senders', async () => {
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const unread = capturedHandler<number>('unreadCount');
 
       unread(60, eventForAccount());
@@ -688,13 +601,12 @@ describe('badgeHelpers (config wiring)', () => {
       unread(0, eventForAccount(2));
 
       expect(mockSetBadgeCount.mock.calls).toEqual([[60], [99], [60]]);
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
     });
 
     it('preserves cached counts across renderer destruction until permanent removal', async () => {
       const hooks = await import('../account/accountWebContentsHooks.js');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const unread = capturedHandler<number>('unreadCount');
       unread(5, eventForAccount());
       unread(7, eventForAccount(2));
@@ -703,17 +615,15 @@ describe('badgeHelpers (config wiring)', () => {
       unread(0, eventForAccount());
       unread(0, eventForAccount(2));
       expect(mockSetBadgeCount).toHaveBeenLastCalledWith(7);
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
       hooks.notifyAccountRemoved(asAccountIndex(2));
 
       expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(false);
     });
 
     it('accepts the replacement before the old disposer and rejects stale or destroyed identities', async () => {
       const hooks = await import('../account/accountWebContentsHooks.js');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const unread = capturedHandler<number>('unreadCount');
       const oldEvent = eventForAccount(2);
       unread(7, oldEvent);
@@ -736,13 +646,12 @@ describe('badgeHelpers (config wiring)', () => {
       unread(0, eventForAccount(2));
 
       expect(mockSetBadgeCount.mock.calls).toEqual([[7], [9]]);
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
     });
 
     it('discards count and favicon caches on removal so recreation starts with unknown count', async () => {
       const hooks = await import('../account/accountWebContentsHooks.js');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const favicon = capturedHandler<string>('faviconChanged');
       const unread = capturedHandler<number>('unreadCount');
       const badge = 'https://mail.google.com/favicon_chat_new_notif_r2.ico';
@@ -761,37 +670,31 @@ describe('badgeHelpers (config wiring)', () => {
 
       favicon(badge, eventForAccount(2));
 
-      expect(mockSetTrayUnread).toHaveBeenLastCalledWith(true);
       expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
     });
 
-    it('uses normal and offline typed-image fallbacks from all remaining accounts', async () => {
-      mockPlatformState.useTemplateTrayIcon = false;
+    it('keeps a zero dock badge when only favicons remain after account removal', async () => {
       const hooks = await import('../account/accountWebContentsHooks.js');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      setupBadgeHandlers(fakeWindow(), fakeTray());
+      setupBadgeHandlers(fakeWindow());
       const favicon = capturedHandler<string>('faviconChanged');
       favicon('https://mail.google.com/favicon_chat_r2.ico', eventForAccount());
       favicon('https://example.com/offline.ico', eventForAccount(2));
-      expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/normal/16.png');
-
       hooks.notifyAccountRemoved(asAccountIndex(0));
 
-      expect(mockGetIcon).toHaveBeenLastCalledWith('resources/icons/offline/16.png');
       expect(mockSetBadgeCount).toHaveBeenLastCalledWith(0);
     });
 
     it('invalidates captured IPC and hook callbacks when the session is cleaned', async () => {
       const hooks = await import('../account/accountWebContentsHooks.js');
       const { setupBadgeHandlers } = await import('./badgeHelpers.js');
-      const cleanups = setupBadgeHandlers(fakeWindow(), fakeTray());
+      const cleanups = setupBadgeHandlers(fakeWindow());
       const unread = capturedHandler<number>('unreadCount');
       unread(8, eventForAccount(2));
 
       cleanups.sessionCleanup();
       cleanups.sessionCleanup();
       mockSetBadgeCount.mockClear();
-      mockSetTrayUnread.mockClear();
       hooks.notifyAccountWebContentsCreated({
         accountIndex: asAccountIndex(2),
         webContents: eventForAccount(2).sender,
@@ -801,7 +704,6 @@ describe('badgeHelpers (config wiring)', () => {
       hooks.notifyAccountRemoved(asAccountIndex(2));
 
       expect(mockSetBadgeCount).not.toHaveBeenCalled();
-      expect(mockSetTrayUnread).not.toHaveBeenCalled();
     });
   });
 });
@@ -813,11 +715,9 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
   beforeEach(async () => {
     vi.resetModules();
     mockSetBadgeCount.mockClear();
-    mockSetTrayUnread.mockClear();
     mockShowNativeNotification.mockClear();
     mockConfigGet.mockReturnValue(false);
     mockPlatformState.supportsDockBadge = true;
-    mockPlatformState.useTemplateTrayIcon = true;
     await backfillLiveAccounts();
     const { getRateLimiter } = await import('../ipc/rateLimiter.js');
     getRateLimiter().resetAll();
@@ -827,7 +727,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     const { ipcMain } = await import('electron');
     const { setupBadgeHandlers } = await import('./badgeHelpers.js');
 
-    setupBadgeHandlers(fakeWindow(), fakeTray());
+    setupBadgeHandlers(fakeWindow());
 
     // The most recently registered ipcMain.on call corresponds to UNREAD_COUNT
     // (FAVICON_CHANGED is registered first, UNREAD_COUNT second).
@@ -850,7 +750,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     const { ipcMain } = await import('electron');
     const { setupBadgeHandlers } = await import('./badgeHelpers.js');
 
-    setupBadgeHandlers(fakeWindow(), fakeTray());
+    setupBadgeHandlers(fakeWindow());
     const onMock = ipcMain.on as unknown as ReturnType<typeof vi.fn>;
     const unreadCall = onMock.mock.calls.find(([ch]) => ch === 'unreadCount');
     const unreadHandler = unreadCall![1] as (e: IpcMainEvent, d: unknown) => void;
@@ -872,7 +772,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
 
     const { getRateLimiter } = await import('../ipc/rateLimiter.js');
     getRateLimiter().resetAll();
-    setupBadgeHandlers(fakeWindow(), fakeTray());
+    setupBadgeHandlers(fakeWindow());
 
     const onMock = ipcMain.on as unknown as ReturnType<typeof vi.fn>;
     const faviconCall = onMock.mock.calls.find(([ch]) => ch === 'faviconChanged');
@@ -884,7 +784,7 @@ describe('badgeHelpers (burst regression with real ipcFastPath)', () => {
     faviconHandler(event, 'https://example.com/x.ico');
     await new Promise((r) => setImmediate(r));
 
-    // setTrayUnread runs inside the handler body — should be called once
-    expect(mockSetTrayUnread).toHaveBeenCalledTimes(1);
+    expect(mockSetBadgeCount).toHaveBeenCalledTimes(1);
+    expect(mockSetBadgeCount).toHaveBeenCalledWith(0);
   });
 });

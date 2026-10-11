@@ -2,15 +2,14 @@
 
 **Parent:** `../AGENTS.md`
 
-This directory owns platform integration: tray, dock/taskbar badges, native notifications presentation, account notification identity/labels, app menu helpers, help menu actions, icon cache, window defaults, and native About/Update dialog chrome (since v3.19.0).
+This directory owns platform integration: dock/app badges, native notifications presentation, account notification identity/labels, app menu helpers, help menu actions, icon cache, window defaults, and native About/Update dialog chrome (since v3.19.0). Startup does not create a menu-bar tray.
 
 ## Conventions
 
 - Public product remains macOS with dual packaging arches (`arm64` and `x64` separate DMGs). Guarded Windows release-engineering/runtime preparation may live here when capability-gated and explicitly not documented as public support.
 - Capability gates live in `platformDetection.ts` (`SUPPORTED_PLATFORM_NAMES`, overlay/dock/tray/autolaunch flags). Feature specs use `platforms: [SUPPORTED_PLATFORM_NAMES.macOS]` for `openAtLogin` and `enforceMacOSAppLocation`.
 - `platformHelpers.enforceMacOSAppLocation()` is the deferred feature body (not under `features/`). Packaged apps not under `/Applications/` call `app.quit()`.
-- Tray/badge coupling is one-way through `trayIconState.setTrayUnread()`.
-- Dock badge sum is `app.setBadgeCount`, capped at `BADGE.DISPLAY_MAX` (99). Tray uses pre-rendered template/type PNGs via `trayIconState` / `iconCache` — `badgeHelpers` does not compose `nativeImage`.
+- Dock badge sum is `app.setBadgeCount`, capped at `BADGE.DISPLAY_MAX` (99). Unread presentation does not construct a `Tray` or call `setImage`.
 - `nativeNotification.ts` owns Electron `Notification` show, tag de-dupe, auto-dismiss, subtitle/groupId options, and bridge vs unread-delta source marking.
 - `notificationFocus.ts` resolves click focus via IPC sender → `IAccountWindowManager.focusAccount` (BW + WCV).
 - Unread-delta OS banners in `badgeHelpers` suppress only when the host/window is focused **and** `manager.isAccountVisible(accountIndex)` (WCV: hidden-live secondary must still notify while another account is frontmost).

@@ -75,7 +75,13 @@ vi.mock('./packageInfo.js', () => ({
   }),
 }));
 
+vi.mock('../account/exitAfterAccountWindows.js', () => ({
+  persistAccountWindowsBeforeExit: vi.fn(async () => undefined),
+  exitAppAfterSavingWindows: vi.fn(async () => undefined),
+}));
+
 import { buildHelpSubMenu, relaunchApp, resetAppAndRestart } from './helpMenuBuilder';
+import { persistAccountWindowsBeforeExit } from '../account/exitAfterAccountWindows.js';
 import { app, dialog, shell } from 'electron';
 import store from '../../config';
 import { openNewGitHubIssue } from './platformHelpers';
@@ -109,12 +115,23 @@ describe('helpMenuBuilder', () => {
   });
 
   describe('relaunchApp', () => {
-    it('relaunches without --hidden flag and exits', () => {
+    it('relaunches without --hidden flag and exits', async () => {
+      const order: string[] = [];
+      vi.mocked(persistAccountWindowsBeforeExit).mockImplementationOnce(async () => {
+        order.push('persist');
+      });
+      vi.mocked(app.relaunch).mockImplementationOnce(() => {
+        order.push('relaunch');
+      });
+      vi.mocked(app.exit).mockImplementationOnce(() => {
+        order.push('exit');
+      });
       const originalArgv = process.argv;
       process.argv = ['node', 'app.js', '--hidden', '--other-flag'];
 
-      relaunchApp();
+      await relaunchApp();
 
+      expect(order).toEqual(['persist', 'relaunch', 'exit']);
       expect(app.relaunch).toHaveBeenCalledWith({
         args: ['node', 'app.js', '--other-flag'],
       });

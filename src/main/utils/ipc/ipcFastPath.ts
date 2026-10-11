@@ -5,7 +5,7 @@
  * Removes: Promise allocation per call (~50µs saved/call on hot paths).
  *
  * ONLY for renderer→main `.send()` (one-way state push), NOT `invoke()`.
- * For request/response or async work, use `createSecureIPCHandler` instead.
+ * For request/response or async work, use `defineIPC` instead.
  */
 
 import { ipcMain, type IpcMainEvent } from 'electron';

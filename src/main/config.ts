@@ -3,7 +3,7 @@ import Store from 'electron-store';
 import { addCacheLayer, isCachedStore, type CachedStore } from './utils/config/configCache.js';
 import log from 'electron-log';
 import { getPackageInfo } from './utils/platform/packageInfo.js';
-import { getOrCreateEncryptionKey, completeMigration } from './utils/security/encryptionKey.js';
+import { getOrCreateEncryptionKey } from './utils/security/encryptionKey.js';
 
 import { schema, CACHE_VERSION } from './utils/config/configSchema.js';
 import { ConfigError } from './utils/lifecycle/errors.js';
@@ -20,14 +20,22 @@ let storeInstance: Store<StoreType> | CachedStore<StoreType> | null = null;
  * Now uses static import with ESM
  *
  * Migration strategy:
- * - If SafeStorage is available but key file doesn't exist while config does,
- *   we need to migrate from the legacy deterministic key to SafeStorage.
- * - Migration is done by exporting all data, creating new store with new key,
- *   and re-importing the data.
+ * - recoverRekey repairs a crashed rekey before the first store opens.
+ * - If SafeStorage is available but the key file is missing while config exists,
+ *   migrate from the legacy deterministic key to SafeStorage.
+ * - rekeyConfigStore writes the new ciphertext beside the live file, then
+ *   swaps it in. The module is loaded on demand.
  */
 export async function initializeStore(): Promise<Store<StoreType> | CachedStore<StoreType>> {
   if (storeInstance) {
     return storeInstance;
+  }
+
+  const { recoverRekey, rekeyConfigStore } = await import('./utils/config/rekeyConfigStore.js');
+  try {
+    recoverRekey();
+  } catch (error: unknown) {
+    log.error('[Config] Failed to restore legacy config:', error);
   }
 
   // Get or create encryption key (SafeStorage-backed or legacy)
@@ -46,23 +54,9 @@ export async function initializeStore(): Promise<Store<StoreType> | CachedStore<
   // case and a new random key would corrupt the data).
   if (migrationPending) {
     try {
-      log.info('[Config] Starting migration from legacy to SafeStorage encryption');
-      const newKey = await completeMigration();
-      if (newKey) {
-        // Export all data from old store
-        const allData = { ...store.store }; // electron-store exposes .store for raw data
-
-        // Create new store with new key
-        store = new Store<StoreType>({
-          schema,
-          encryptionKey: newKey,
-        });
-
-        // Import data into new store
-        for (const [key, value] of Object.entries(allData)) {
-          store.set(asType<keyof StoreType>(key), value);
-        }
-        log.info('[Config] Migration to SafeStorage encryption complete');
+      const rekeyed = rekeyConfigStore(store);
+      if (rekeyed) {
+        store = rekeyed;
       }
     } catch (error: unknown) {
       log.error('[Config] Migration failed, continuing with legacy key:', error);

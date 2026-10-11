@@ -84,8 +84,14 @@ const h = vi.hoisted(() => {
     public restore: ReturnType<typeof vi.fn>;
     public maximize: ReturnType<typeof vi.fn>;
     public setBounds: ReturnType<typeof vi.fn>;
+    public setSize: ReturnType<typeof vi.fn>;
+    public center: ReturnType<typeof vi.fn>;
     public getBounds: ReturnType<typeof vi.fn>;
+    public getNormalBounds?: () => { x: number; y: number; width: number; height: number };
     public isMaximized: ReturnType<typeof vi.fn>;
+    public fullScreen = false;
+    public isFullScreen: ReturnType<typeof vi.fn>;
+    public setFullScreen: ReturnType<typeof vi.fn>;
     public isMinimized: ReturnType<typeof vi.fn>;
     public isDestroyed: ReturnType<typeof vi.fn>;
     public loadURL: ReturnType<typeof vi.fn>;
@@ -120,8 +126,16 @@ const h = vi.hoisted(() => {
       this.setBounds = vi.fn((b: { x: number; y: number; width: number; height: number }): void => {
         this.bounds = { ...b };
       });
+      this.setSize = vi.fn((width: number, height: number): void => {
+        this.bounds = { ...this.bounds, width, height };
+      });
+      this.center = vi.fn();
       this.getBounds = vi.fn(() => ({ ...this.bounds }));
       this.isMaximized = vi.fn((): boolean => this.maximized);
+      this.isFullScreen = vi.fn((): boolean => this.fullScreen);
+      this.setFullScreen = vi.fn((value: boolean): void => {
+        this.fullScreen = value;
+      });
       this.isMinimized = vi.fn((): boolean => this.minimized);
       this.isDestroyed = vi.fn((): boolean => this.destroyed);
       this.isVisible = vi.fn((): boolean => this.visible && !this.destroyed);
@@ -299,6 +313,10 @@ import {
   spiesOf,
 } from '../../../../tests/mocks/logCapture';
 import { getCleanupManager } from '../lifecycle/resourceCleanup.js';
+import {
+  prepareAccountWindows,
+  resetAccountWindowPersistenceForTests,
+} from './accountWindowPersistenceBridge.js';
 import * as resourceCleanup from '../lifecycle/resourceCleanup.js';
 import { startSessionMaintenance, stopSessionMaintenance } from './accountSessionMaintenance.js';
 import { getAccountViewManager, resetAccountViewManagerSingleton } from './accountViewManager.js';
@@ -335,7 +353,7 @@ function makeFactory(): WindowFactory & { createWindow: ReturnType<typeof vi.fn>
   return { createWindow: fn };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   const createTimeout = resourceCleanup.createTrackedTimeout;
   vi.spyOn(resourceCleanup, 'createTrackedTimeout').mockImplementation((callback, delay, name) => {
     const id = createTimeout(callback, delay, name);
@@ -351,10 +369,12 @@ beforeEach(() => {
   h.MockWC.nextId = 1;
   destroyAccountWindowManager();
   vi.clearAllMocks();
+  await prepareAccountWindows();
 });
 
-afterEach(() => {
+afterEach(async () => {
   destroyAccountWindowManager();
+  await resetAccountWindowPersistenceForTests();
   getCleanupManager().reset();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -1081,6 +1101,22 @@ describe('AccountWindowManager — dehydrate / hydrate', () => {
     const w2 = m.hydrateAccount(asAccountIndex(1));
     const w2Mock = w2 as unknown as MockBWInstance;
     expect(w2Mock.maximize).not.toHaveBeenCalled();
+    expect(w2Mock.setFullScreen).not.toHaveBeenCalled();
+  });
+
+  it('hydrateAccount restores fullscreen and does not also maximize', () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    const w = m.createAccountWindow('https://hello/', asAccountIndex(1));
+    const wMock = w as unknown as MockBWInstance;
+    wMock.fullScreen = true;
+    wMock.maximized = false;
+
+    m.dehydrateAccount(asAccountIndex(1));
+    const w2 = m.hydrateAccount(asAccountIndex(1));
+    const w2Mock = w2 as unknown as MockBWInstance;
+    expect(w2Mock.setFullScreen).toHaveBeenCalledWith(true);
+    expect(w2Mock.maximize).not.toHaveBeenCalled();
   });
 });
 
@@ -1218,6 +1254,133 @@ describe('AccountWindowManager — state persistence', () => {
 
   it('flushAccountWindowsWrites resolves cleanly even when nothing was queued', async () => {
     await expect(flushAccountWindowsWrites()).resolves.toBeUndefined();
+  });
+
+  it('restores saved normal bounds and maximized state before show for sparse accounts', () => {
+    h.mockStore['accountWindows'] = {
+      0: { bounds: { x: 40, y: 60, width: 900.4, height: 700.2 }, isMaximized: false },
+      4: { bounds: { x: 120, y: 80, width: 840, height: 680 }, isMaximized: true },
+    };
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    const primary = m.createAccountWindow(
+      'https://work/',
+      asAccountIndex(0)
+    ) as unknown as MockBWInstance;
+    const secondary = m.createAccountWindow(
+      'https://client/',
+      asAccountIndex(4)
+    ) as unknown as MockBWInstance;
+
+    expect(primary.setBounds).toHaveBeenCalledWith({ x: 40, y: 60, width: 900, height: 700 });
+    expect(primary.maximize).not.toHaveBeenCalled();
+    expect(secondary.setBounds).toHaveBeenCalledWith({ x: 120, y: 80, width: 840, height: 680 });
+    const setOrder = secondary.setBounds.mock.invocationCallOrder[0];
+    const maxOrder = secondary.maximize.mock.invocationCallOrder[0];
+    expect(setOrder).toBeLessThan(maxOrder ?? Number.POSITIVE_INFINITY);
+    expect(secondary.maximize).toHaveBeenCalledOnce();
+  });
+
+  it('centers a saved window when a coordinate is null', () => {
+    h.mockStore['accountWindows'] = {
+      2: { bounds: { x: null, y: 10, width: 810, height: 610 }, isMaximized: false },
+    };
+    const m = new AccountWindowManager(makeFactory());
+    const window = m.createAccountWindow(
+      'https://x/',
+      asAccountIndex(2)
+    ) as unknown as MockBWInstance;
+    expect(window.setSize).toHaveBeenCalledWith(810, 610);
+    expect(window.center).toHaveBeenCalledOnce();
+    expect(window.setBounds).not.toHaveBeenCalled();
+  });
+
+  it('dehydrates the normal bounds, not the maximized screen rect', async () => {
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    const window = m.createAccountWindow(
+      'https://hello/',
+      asAccountIndex(1)
+    ) as unknown as MockBWInstance;
+    window.getBounds.mockReturnValue({ x: 0, y: 0, width: 1440, height: 900 });
+    window.maximized = true;
+    window.getNormalBounds = vi.fn(() => ({ x: 30, y: 40, width: 960, height: 720 }));
+
+    m.dehydrateAccount(asAccountIndex(1));
+    await flushAccountWindowsWrites();
+
+    const stored = h.mockStore['accountWindows'] as Record<
+      number,
+      { bounds: { x: number; y: number; width: number; height: number }; isMaximized: boolean }
+    >;
+    expect(stored[1]).toEqual({
+      bounds: { x: 30, y: 40, width: 960, height: 720 },
+      isMaximized: true,
+    });
+
+    const restored = m.hydrateAccount(asAccountIndex(1)) as unknown as MockBWInstance;
+    expect(restored.setBounds).toHaveBeenCalledWith({ x: 30, y: 40, width: 960, height: 720 });
+    expect(restored.setBounds.mock.invocationCallOrder[0]).toBeLessThan(
+      restored.maximize.mock.invocationCallOrder[0] ?? 0
+    );
+    expect(restored.loadURL).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a failed config write and still persists a later account', async () => {
+    const { configSet } = await import('../../config.js');
+    let failed = false;
+    vi.mocked(configSet).mockImplementation((key: string, value: unknown) => {
+      if (key === 'accountWindows' && !failed) {
+        failed = true;
+        throw new Error('disk full');
+      }
+      h.mockStore[key] = value;
+    });
+    const factory = makeFactory();
+    const m = new AccountWindowManager(factory);
+    const first = m.createAccountWindow(
+      'https://a/',
+      asAccountIndex(0)
+    ) as unknown as MockBWInstance;
+    const second = m.createAccountWindow(
+      'https://b/',
+      asAccountIndex(2)
+    ) as unknown as MockBWInstance;
+    first.bounds = { x: 1, y: 2, width: 500, height: 600 };
+    second.bounds = { x: 8, y: 9, width: 510, height: 610 };
+
+    m.saveAccountWindowState(asAccountIndex(0));
+    m.saveAccountWindowState(asAccountIndex(2));
+    await flushAccountWindowsWrites();
+
+    expect(log.error).toHaveBeenCalledWith(
+      '[AccountWindows] Failed to persist account window state:',
+      expect.objectContaining({ message: '[redacted]' })
+    );
+    const stored = h.mockStore['accountWindows'] as Record<number, { bounds: { x: number } }>;
+    expect(stored[2]?.bounds.x).toBe(8);
+    vi.mocked(configSet).mockImplementation((key: string, value: unknown) => {
+      h.mockStore[key] = value;
+    });
+  });
+
+  it('removes bounds listeners on resource cleanup and leaves activity listeners', async () => {
+    const m = new AccountWindowManager(makeFactory());
+    const window = m.createAccountWindow(
+      'https://x/',
+      asAccountIndex(2)
+    ) as unknown as MockBWInstance;
+    const focusCount = window.listenerCount('focus');
+    expect(window.listenerCount('resize')).toBeGreaterThan(0);
+    expect(window.listenerCount('maximize')).toBeGreaterThan(0);
+
+    await getCleanupManager().cleanup({ includeGlobalResources: false, logDetails: false });
+
+    expect(window.listenerCount('resize')).toBe(0);
+    expect(window.listenerCount('move')).toBe(0);
+    expect(window.listenerCount('maximize')).toBe(0);
+    expect(window.listenerCount('unmaximize')).toBe(0);
+    expect(window.listenerCount('focus')).toBe(focusCount);
   });
 });
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BrowserWindow, IpcMainEvent, Tray, WebContents } from 'electron';
+import type { BrowserWindow, IpcMainEvent, WebContents } from 'electron';
 import { electronMock } from '../../../tests/mocks/electron';
 import { IPC_CHANNELS } from '../../shared/constants.js';
 import { asType } from '../../shared/typeUtils.js';
@@ -59,8 +59,7 @@ describe('feature IPC cleanup ownership', () => {
   it('cleanupBadgeIcon removes only feature-owned listeners', async () => {
     const mod = await import('./badgeIcon.js');
 
-    const tray = { setImage: vi.fn() };
-    mod.default(asType<BrowserWindow>({}), asType<Tray>(tray));
+    mod.default(asType<BrowserWindow>({}));
 
     const externalFaviconListener = vi.fn();
     const externalUnreadListener = vi.fn();
@@ -108,8 +107,7 @@ describe('feature IPC cleanup ownership', () => {
     accountHooks.onAccountWebContentsCreated(externalCreated);
     accountHooks.onAccountRemoved(externalRemoved);
     const window = asType<BrowserWindow>({ isDestroyed: () => false, isFocused: () => false });
-    const tray = asType<Tray>({ setImage: vi.fn() });
-    mod.default(window, tray);
+    mod.default(window);
     const event = asType<IpcMainEvent>({ sender });
     electronMock.ipcMain.emit(IPC_CHANNELS.UNREAD_COUNT, event, 8);
     const badge = vi.spyOn(electronMock.app, 'setBadgeCount');

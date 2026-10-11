@@ -12,12 +12,13 @@
  *   - early window closure removes all listeners gracefully
  *   - non-authenticated URLs are ignored
  *   - init() is a no-op when no accounts are marked as bootstrap
- *   - watchBootstrapAccount() promotes secondary (account-1+) windows
+ *   - watchBootstrapAccount() from bootstrapWatcher promotes secondary accounts
  *   - init() watches all currently-bootstrap accounts simultaneously
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
+import type * as BootstrapWatcher from '../utils/account/bootstrapWatcher.js';
 import {
   expectNoSentinels,
   makeSecretError,
@@ -120,6 +121,8 @@ describe('bootstrapPromotion feature', () => {
   let windowMap: Map<number, ReturnType<typeof makeFakeWindow>>;
   let mgr: ReturnType<typeof makeFakeMgr>;
   let account0Win: ReturnType<typeof makeFakeWindow>;
+  let watchBootstrapAccount: typeof BootstrapWatcher.watchBootstrapAccount;
+  let cleanupBootstrapPromotion: typeof BootstrapWatcher.cleanupBootstrapPromotion;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -130,6 +133,8 @@ describe('bootstrapPromotion feature', () => {
     windowMap = new Map([[0, account0Win]]);
     mgr = makeFakeMgr(bootstrapAccounts, windowMap);
     getAccountWindowManagerMock.mockReturnValue(mgr);
+    ({ watchBootstrapAccount, cleanupBootstrapPromotion } =
+      await import('../utils/account/bootstrapWatcher.js'));
   });
 
   // ── No-op cases ─────────────────────────────────────────────────────────────
@@ -315,13 +320,13 @@ describe('bootstrapPromotion feature', () => {
     const feature = await import('./bootstrapPromotion.js');
     feature.default();
 
-    expect(() => feature.cleanupBootstrapPromotion()).not.toThrow();
+    expect(() => cleanupBootstrapPromotion()).not.toThrow();
   });
 
   it('cleanupBootstrapPromotion() prevents promotion after cleanup', async () => {
     const feature = await import('./bootstrapPromotion.js');
     feature.default();
-    feature.cleanupBootstrapPromotion();
+    cleanupBootstrapPromotion();
 
     // Navigation after cleanup — listener must be gone.
     account0Win.webContents.emit('did-navigate', {}, 'https://chat.google.com/u/0/');
@@ -333,8 +338,8 @@ describe('bootstrapPromotion feature', () => {
     feature.default();
 
     expect(() => {
-      feature.cleanupBootstrapPromotion();
-      feature.cleanupBootstrapPromotion();
+      cleanupBootstrapPromotion();
+      cleanupBootstrapPromotion();
     }).not.toThrow();
   });
 
@@ -373,8 +378,7 @@ describe('bootstrapPromotion feature', () => {
 
     it('returns a no-op when the account is not marked as bootstrap', async () => {
       bootstrapAccounts.delete(1); // account-1 NOT bootstrap
-      const feature = await import('./bootstrapPromotion.js');
-      const detach = feature.watchBootstrapAccount(1);
+      const detach = watchBootstrapAccount(1);
       expect(detach).toBeTypeOf('function');
       expect(() => detach()).not.toThrow();
       expect(mgr.promoteBootstrap).not.toHaveBeenCalled();
@@ -382,23 +386,20 @@ describe('bootstrapPromotion feature', () => {
 
     it('returns a no-op when the account window does not exist', async () => {
       windowMap.delete(1);
-      const feature = await import('./bootstrapPromotion.js');
-      const detach = feature.watchBootstrapAccount(1);
+      const detach = watchBootstrapAccount(1);
       expect(() => detach()).not.toThrow();
       expect(mgr.promoteBootstrap).not.toHaveBeenCalled();
     });
 
     it('returns a no-op when the account window is already destroyed', async () => {
       account1Win._destroyed = true;
-      const feature = await import('./bootstrapPromotion.js');
-      const detach = feature.watchBootstrapAccount(1);
+      const detach = watchBootstrapAccount(1);
       expect(() => detach()).not.toThrow();
       expect(mgr.promoteBootstrap).not.toHaveBeenCalled();
     });
 
     it('promotes account-1 when did-navigate fires with an authenticated URL', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       account1Win.webContents.emit('did-navigate', {}, 'https://chat.google.com/u/1/');
 
@@ -407,8 +408,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('does NOT promote account-1 on a non-authenticated URL', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       account1Win.webContents.emit('did-navigate', {}, 'https://accounts.google.com/signin');
 
@@ -416,8 +416,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('self-cleans after account-1 promotion (no double-fire)', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       account1Win.webContents.emit('did-navigate', {}, 'https://chat.google.com/u/1/');
       expect(mgr.promoteBootstrap).toHaveBeenCalledOnce();
@@ -428,8 +427,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('returned detach function prevents promotion before auth fires', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      const detach = feature.watchBootstrapAccount(1);
+      const detach = watchBootstrapAccount(1);
 
       // Detach before any auth.
       detach();
@@ -439,8 +437,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('returned detach function is idempotent (double-call does not error)', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      const detach = feature.watchBootstrapAccount(1);
+      const detach = watchBootstrapAccount(1);
 
       expect(() => {
         detach();
@@ -449,8 +446,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('promotes account-1 via child (popup) window auth', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       const childWin = makeFakeWindow();
       account1Win.webContents.emit('did-create-window', childWin, {});
@@ -461,8 +457,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('destroys account-1 child window after popup auth completes', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       const childWin = makeFakeWindow();
       account1Win.webContents.emit('did-create-window', childWin, {});
@@ -472,8 +467,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('does NOT reload the account-1 main window after popup auth (account-0 only behavior)', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       const childWin = makeFakeWindow();
       account1Win.webContents.emit('did-create-window', childWin, {});
@@ -484,8 +478,7 @@ describe('bootstrapPromotion feature', () => {
     });
 
     it('does nothing if account-1 window closes before auth completes', async () => {
-      const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1);
+      watchBootstrapAccount(1);
 
       account1Win.destroy();
 
@@ -494,7 +487,7 @@ describe('bootstrapPromotion feature', () => {
 
     it('promotes account-1 and account-0 independently when both are bootstrap', async () => {
       const feature = await import('./bootstrapPromotion.js');
-      feature.watchBootstrapAccount(1); // watch secondary
+      watchBootstrapAccount(1); // watch secondary
       feature.default(); // also watch account-0 via init
 
       // Account-1 authenticates first.
@@ -539,7 +532,7 @@ describe('bootstrapPromotion feature', () => {
       const feature = await import('./bootstrapPromotion.js');
       feature.default();
 
-      feature.cleanupBootstrapPromotion();
+      cleanupBootstrapPromotion();
 
       // Neither account should promote after cleanup.
       account0Win.webContents.emit('did-navigate', {}, 'https://chat.google.com/u/0/');

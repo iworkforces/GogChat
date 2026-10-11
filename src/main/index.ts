@@ -9,8 +9,9 @@ import { registerCleanupTask } from './utils/lifecycle/resourceCleanup.js';
 import windowWrapper from './windowWrapper.js';
 
 import { registerShutdownHandler } from './initializers/registerShutdown.js';
-import { registerAppReady, getMostRecentWindow } from './initializers/registerAppReady.js';
+import { registerAppReady } from './initializers/registerAppReady.js';
 import { APP_IDENTITY } from '../shared/appIdentity.js';
+import { onDockActivate, setDockActivateMainWindowGetter } from './dockActivate.js';
 
 // Cap V8 heap per renderer (default 512MB, conservative for Google Chat SPA).
 // Must be set before app.ready per Electron docs. Replaces the previous anti-throttle
@@ -65,14 +66,6 @@ registerShutdownHandler();
 
 app.setAppUserModelId(APP_IDENTITY.appId);
 
-app.on('activate', () => {
-  // Always get fresh window reference — mainWindow may be stale after account switches
-  const windowToShow = getMostRecentWindow() ?? mainWindow;
-  if (windowToShow && !windowToShow.isDestroyed()) {
-    if (windowToShow.isMinimized()) {
-      windowToShow.restore();
-    }
-    windowToShow.show();
-    windowToShow.focus();
-  }
-});
+// Dock click restores the existing window. The registered function is onDockActivate.
+setDockActivateMainWindowGetter(() => mainWindow);
+app.on('activate', onDockActivate);

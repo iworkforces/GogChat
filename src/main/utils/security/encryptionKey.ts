@@ -43,7 +43,7 @@ export interface EncryptionKeyResult {
   /**
    * True when the store was opened with the legacy deterministic key AND
    * SafeStorage is available — meaning the caller should migrate the data
-   * to a new SafeStorage-backed key via completeMigration().
+   * to a new SafeStorage-backed key via rekeyConfigStore().
    * False in all other cases (fresh install, already migrated, SafeStorage unavailable).
    */
   migrationPending: boolean;
@@ -116,52 +116,4 @@ async function handleSafeStorageKey(): Promise<EncryptionKeyResult> {
   await fs.writeFile(keyFilePath, encrypted);
   log.info('[EncryptionKey] Generated new encryption key, stored in SafeStorage');
   return { key: newKey, migrationPending: false };
-}
-
-/**
- * Check if migration from legacy deterministic key to SafeStorage is needed.
- * Returns true when:
- * - SafeStorage is available
- * - No key file exists
- * - Config file exists (indicating existing user data)
- */
-/**
- * @deprecated Use the `migrationPending` field from `getOrCreateEncryptionKey()` instead.
- * This standalone function cannot know whether the caller already fell back to the legacy
- * key due to a SafeStorage failure, which would make migration unsafe.
- *
- * Kept for any external callers; config.ts no longer uses it.
- */
-export async function needsMigration(): Promise<boolean> {
-  if (!safeStorage.isEncryptionAvailable()) {
-    return false;
-  }
-
-  const keyFilePath = path.join(app.getPath('userData'), ENCRYPTION_KEY_FILE);
-  return !(await fileExists(keyFilePath));
-}
-
-/**
- * Complete migration from legacy deterministic key to SafeStorage-protected key.
- * This should be called AFTER opening the store with the legacy key and reading all data.
- * Returns the new encryption key, or null if migration cannot proceed.
- */
-export async function completeMigration(): Promise<string | null> {
-  if (!safeStorage.isEncryptionAvailable()) {
-    return null;
-  }
-
-  const keyFilePath = path.join(app.getPath('userData'), ENCRYPTION_KEY_FILE);
-
-  // If key file already exists, migration already done
-  if (await fileExists(keyFilePath)) {
-    return null;
-  }
-
-  // Generate new key and save using SafeStorage
-  const newKey = randomBytes(32).toString('hex');
-  const encrypted = safeStorage.encryptString(newKey);
-  await fs.writeFile(keyFilePath, encrypted);
-  log.info('[EncryptionKey] Migration complete — new key stored in SafeStorage');
-  return newKey;
 }

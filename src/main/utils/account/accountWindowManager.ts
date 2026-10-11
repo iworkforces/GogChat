@@ -33,11 +33,14 @@ import {
   stopSessionMaintenance,
 } from './accountSessionMaintenance.js';
 import {
-  buildAccountWindowState,
-  persistAccountWindowState,
-  flushAccountWindowsWrites as _flushAccountWindowsWrites,
-  readAccountWindowState as _getAccountWindowState,
-} from './accountWindowsStore.js';
+  applyAccountWindowState,
+  captureAccountWindowSnapshot,
+  flushAccountWindowPersistence,
+  readAccountWindowState,
+  submitAccountWindowState,
+  unwatchAccountWindow,
+  watchAccountWindow,
+} from './accountWindowPersistenceBridge.js';
 import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
 import { getAccountViewManager, resetAccountViewManagerSingleton } from './accountViewManager.js';
 import {
@@ -65,13 +68,25 @@ interface DehydratedSnapshot {
   url: string;
   bounds: { x: number; y: number; width: number; height: number };
   isMaximized: boolean;
+  isFullScreen?: boolean;
 }
 
-/**
- * Re-export of the shared write-queue flusher so existing tests and
- * callers continue to import it from this module.
- */
-export const flushAccountWindowsWrites = _flushAccountWindowsWrites;
+/** Copy bounds and maximized state. Fullscreen is stored only while it is on. */
+function presentationState(captured: {
+  bounds: { x: number; y: number; width: number; height: number };
+  isMaximized: boolean;
+  isFullScreen?: boolean;
+}): AccountWindowState {
+  const state: AccountWindowState = {
+    bounds: { ...captured.bounds },
+    isMaximized: captured.isMaximized,
+  };
+  if (captured.isFullScreen === true) state.isFullScreen = true;
+  return state;
+}
+
+/** Re-export so tests can await the shared write queue from this module. */
+export const flushAccountWindowsWrites = flushAccountWindowPersistence;
 
 /**
  * Account Window Manager - Manages per-account BrowserWindow instances
@@ -272,9 +287,11 @@ export class AccountWindowManager implements IAccountWindowManager {
       onFocusThrottle,
       onBlurThrottle,
     });
+    watchAccountWindow(window, accountIndex);
   }
 
   private detachActivityListeners(window: BrowserWindow): void {
+    unwatchAccountWindow(window);
     const handle = this.activityListeners.get(window);
     if (!handle) {
       return;
@@ -478,6 +495,8 @@ export class AccountWindowManager implements IAccountWindowManager {
   private registerNewlyCreatedWindow(window: BrowserWindow, accountIndex: AccountIndex): void {
     try {
       this.registerWindow(window, accountIndex);
+      // Saved bounds before ready-to-show. Hydrate does not use this path.
+      applyAccountWindowState(window, accountIndex);
       if (
         window &&
         !window.isDestroyed() &&
@@ -539,17 +558,21 @@ export class AccountWindowManager implements IAccountWindowManager {
   // ─── Window state persistence ────────────────────────────────────────────
 
   saveAccountWindowState(accountIndex: AccountIndex): void {
-    const window = this.getAccountWindow(accountIndex);
-    if (!window || window.isDestroyed()) {
-      return;
+    const live = this.getAccountWindow(accountIndex);
+    let state: AccountWindowState;
+    if (live && !live.isDestroyed()) {
+      state = presentationState(captureAccountWindowSnapshot(live));
+    } else {
+      const parked = this.dehydratedAccounts.get(accountIndex);
+      if (!parked) return;
+      state = presentationState(parked);
     }
-
-    void persistAccountWindowState(accountIndex, buildAccountWindowState(window));
+    submitAccountWindowState(accountIndex, state);
     log.debug(`[AccountWindowManager] Saved state for account ${accountIndex}`);
   }
 
   getAccountWindowState(accountIndex: AccountIndex): AccountWindowState | null {
-    return _getAccountWindowState(accountIndex);
+    return readAccountWindowState(accountIndex);
   }
 
   // ─── T12/M3 — Hydrate / Dehydrate ──────────────────────────────────────────
@@ -580,16 +603,19 @@ export class AccountWindowManager implements IAccountWindowManager {
     if (!window || window.isDestroyed()) {
       return;
     }
-    // Capture state BEFORE destroying — once destroyed, webContents/getURL
-    // become unreliable.
-    const bounds = window.getBounds();
+    // Capture normal bounds BEFORE destroy. getBounds() is the maximized
+    // screen rect while maximized, which would become the restored size.
+    const captured = captureAccountWindowSnapshot(window);
     const snapshot: DehydratedSnapshot = {
       url: window.webContents.getURL(),
-      bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-      isMaximized: window.isMaximized(),
+      bounds: captured.bounds,
+      isMaximized: captured.isMaximized,
+      ...(captured.isFullScreen === true ? { isFullScreen: true } : {}),
     };
     this.dehydratedAccounts.set(accountIndex, snapshot);
     this.cancelDehydrate(accountIndex);
+    // getAccountWindow is now null, so save persists the snapshot.
+    this.saveAccountWindowState(accountIndex);
     // Detach our listeners first so the closed handler does not race with the
     // explicit cleanup we are about to perform.
     this.detachActivityListeners(window);
@@ -616,9 +642,7 @@ export class AccountWindowManager implements IAccountWindowManager {
       return this.registry.getAccountWindow(accountIndex);
     }
     if (!this.windowFactory) {
-      throw new Error(
-        `[AccountWindowManager] hydrateAccount(${accountIndex}): no WindowFactory configured — cannot recreate window`
-      );
+      throw new Error(`[AccountWindowManager] no WindowFactory for ${accountIndex}`);
     }
     const partition = toPartition(accountIndex);
     const window = this.windowFactory.createWindow(snapshot.url, partition);
@@ -631,7 +655,9 @@ export class AccountWindowManager implements IAccountWindowManager {
       // Restore presentation state. setBounds first, then maximize, so that the
       // pre-maximize bounds are remembered for later unmaximize.
       window.setBounds(snapshot.bounds);
-      if (snapshot.isMaximized) {
+      if (snapshot.isFullScreen === true && typeof window.setFullScreen === 'function') {
+        window.setFullScreen(true);
+      } else if (snapshot.isMaximized) {
         window.maximize();
       }
       // Navigation is owned solely by the factory (windowWrapper calls loadURL

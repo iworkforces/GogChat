@@ -119,11 +119,6 @@ vi.mock('../utils/account/accountWebContentsHooks.js', () => ({
   onAccountWebContentsCreated: vi.fn(() => () => {}),
 }));
 
-// Mock bootstrapPromotion
-vi.mock('./bootstrapPromotion.js', () => ({
-  watchBootstrapAccount: vi.fn(),
-}));
-
 // Mock resourceCleanup for createTrackedInterval
 vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
   cancelTrackedInterval: (handle: NodeJS.Timeout) => clearInterval(handle),

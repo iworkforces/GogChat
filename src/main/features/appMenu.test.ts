@@ -33,6 +33,14 @@ vi.mock('electron-log', () => ({
   default: { log: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+vi.mock('../utils/account/exitAfterAccountWindows.js', () => ({
+  exitAppAfterSavingWindows: vi.fn(async () => {
+    const { app } = await import('electron');
+    app.exit();
+  }),
+  persistAccountWindowsBeforeExit: vi.fn(async () => undefined),
+}));
+
 const { mockAboutHandler, mockAutoLaunchInstance, mockAutoLaunchSupport, mockToggleGuardHandler } =
   vi.hoisted(() => ({
     mockAboutHandler: vi.fn(),
@@ -164,6 +172,10 @@ vi.mock('../utils/platform/accountNotificationIdentity.js', () => ({
 }));
 
 import appMenu from './appMenu';
+import {
+  exitAppAfterSavingWindows,
+  persistAccountWindowsBeforeExit,
+} from '../utils/account/exitAfterAccountWindows.js';
 import { _getMenuAction } from './menuActionRegistry';
 import { Menu, app, _dialog, clipboard } from 'electron';
 import store from '../config';
@@ -222,7 +234,7 @@ describe('appMenu', () => {
     expect(Menu.setApplicationMenu).toHaveBeenCalled();
   });
 
-  it('includes File menu with Close To Tray action', () => {
+  it('includes File menu with Hide Window action', () => {
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -230,18 +242,36 @@ describe('appMenu', () => {
     const fileMenu = template.find((item: MenuItemConstructorOptions) => item.label === 'File');
     expect(fileMenu).toBeDefined();
 
-    const closeToTray = fileMenu.submenu.find(
-      (item: MenuItemConstructorOptions) => item.label === 'Close To Tray'
+    const hideWindow = fileMenu.submenu.find(
+      (item: MenuItemConstructorOptions) => item.label === 'Hide Window'
     );
-    expect(closeToTray).toBeDefined();
-    expect(closeToTray.accelerator).toBe('CommandOrControl+W');
+    expect(hideWindow).toBeDefined();
+    expect(hideWindow.accelerator).toBe('CommandOrControl+W');
 
-    // Invoke the click handler
-    closeToTray.click();
+    hideWindow.click();
     expect(window.hide).toHaveBeenCalled();
   });
 
-  it('includes File menu with Quit action', () => {
+  it('keeps Quit and About and does not label any item as a tray', () => {
+    const window = makeFakeWindow();
+    appMenu(window as BrowserWindow);
+
+    const template = Menu.buildFromTemplate.mock.calls[0][0] as MenuItemConstructorOptions[];
+    const labels: string[] = [];
+    const visit = (items: readonly MenuItemConstructorOptions[]): void => {
+      for (const item of items) {
+        if (typeof item.label === 'string') labels.push(item.label);
+        if (Array.isArray(item.submenu)) visit(item.submenu);
+      }
+    };
+    visit(template);
+
+    expect(labels).toContain('Quit');
+    expect(labels).toContain('About');
+    expect(labels.some((label) => /tray/i.test(label))).toBe(false);
+  });
+
+  it('includes File menu with Quit action', async () => {
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -250,6 +280,8 @@ describe('appMenu', () => {
     const quit = fileMenu.submenu.find((item: MenuItemConstructorOptions) => item.label === 'Quit');
 
     quit.click();
+    await vi.mocked(exitAppAfterSavingWindows).mock.results.at(-1)?.value;
+    expect(exitAppAfterSavingWindows).toHaveBeenCalledOnce();
     expect(app.exit).toHaveBeenCalled();
   });
 
@@ -466,7 +498,17 @@ describe('appMenu', () => {
     expect(versionItem.enabled).toBe(false);
   });
 
-  it('Relaunch action relaunches without --hidden flag', () => {
+  it('Relaunch action saves windows before relaunching', async () => {
+    const order: string[] = [];
+    vi.mocked(persistAccountWindowsBeforeExit).mockImplementationOnce(async () => {
+      order.push('persist');
+    });
+    vi.mocked(app.relaunch).mockImplementationOnce(() => {
+      order.push('relaunch');
+    });
+    vi.mocked(app.exit).mockImplementationOnce(() => {
+      order.push('exit');
+    });
     const window = makeFakeWindow();
     appMenu(window as BrowserWindow);
 
@@ -477,7 +519,7 @@ describe('appMenu', () => {
     );
 
     relaunch.click();
-    expect(app.relaunch).toHaveBeenCalled();
-    expect(app.exit).toHaveBeenCalled();
+    await vi.mocked(persistAccountWindowsBeforeExit).mock.results.at(-1)?.value;
+    expect(order).toEqual(['persist', 'relaunch', 'exit']);
   });
 });

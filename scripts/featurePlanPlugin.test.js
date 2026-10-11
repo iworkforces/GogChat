@@ -55,6 +55,13 @@ describe('featurePlanPlugin – snapshot vs checked-in featurePlan.ts', () => {
     // Then no certificate-error override feature is reachable at startup
     expect(source).not.toContain('certificatePinning');
   });
+
+  it('schedules badge and hide-on-close without a tray-icon feature', async () => {
+    const { source } = await generateFeaturePlan({ projectRoot: PROJECT_ROOT, write: false });
+    expect(source).not.toContain("get('trayIcon')");
+    expect(source).toContain("get('badgeIcons')");
+    expect(source).toContain("get('closeToTray')");
+  });
 });
 
 describe('parseSpecSource – AST-based parser', () => {

@@ -20,7 +20,7 @@ import type { StoreType } from '../../../shared/types/config.js';
  * Error context provides additional information about where/when an error occurred
  */
 export interface ErrorContext {
-  feature?: string; // Feature name (e.g., 'certificatePinning', 'trayIcon')
+  feature?: string; // Feature name (e.g., 'badgeIcons', 'closeToTray')
   phase?: 'security' | 'critical' | 'ui' | 'deferred'; // Initialization phase
   operation?: string; // Operation being performed (e.g., 'initialization', 'cleanup')
   metadata?: Record<string, unknown>; // Additional context

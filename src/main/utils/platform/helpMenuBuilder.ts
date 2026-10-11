@@ -7,11 +7,13 @@ import environment from '../../../environment.js';
 import { openNewGitHubIssue, debugInfo } from './platformHelpers.js';
 import { getPackageInfo } from './packageInfo.js';
 import { getMenuAction } from '../../features/menuActionRegistry.js';
+import { persistAccountWindowsBeforeExit } from '../account/exitAfterAccountWindows.js';
 
 /**
  * Relaunch the application without the --hidden flag (filters out auto-launch hidden start).
  */
-export const relaunchApp = (): void => {
+export const relaunchApp = async (): Promise<void> => {
+  await persistAccountWindowsBeforeExit();
   app.relaunch({
     // auto-launch adds the --hidden flag to the command during OS start
     // This will launch the app without hidden flag
@@ -30,7 +32,7 @@ export const resetAppAndRestart = async (window: BrowserWindow): Promise<void> =
   await session.clearStorageData();
   await session.clearCache();
   log.log('cleared app data');
-  relaunchApp();
+  await relaunchApp();
 };
 
 /**
