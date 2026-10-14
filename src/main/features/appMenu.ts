@@ -105,7 +105,7 @@ function setAppMenu(window: BrowserWindow): void {
       label: 'File',
       submenu: [
         {
-          label: 'Close To Tray',
+          label: 'Hide Window',
           accelerator: 'CommandOrControl+W',
           click: () => {
             window.hide();

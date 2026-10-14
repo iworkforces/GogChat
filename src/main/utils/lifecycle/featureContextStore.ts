@@ -3,7 +3,7 @@
  *
  * Holds a singleton reference to the live FeatureContext established by
  * `registerAppReady`. The shutdown handler reads it to pass the same context
- * (mainWindow, trayIcon, callbacks, accountWindowManager) into each spec's
+ * (mainWindow, callbacks, accountWindowManager) into each spec's
  * cleanup function — preserving the symmetry of the previous FeatureManager.
  *
  * Kept as a tiny module to avoid coupling registerAppReady ↔ registerShutdown.

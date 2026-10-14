@@ -11,7 +11,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({
   app: { setBadgeCount: vi.fn() },
   BrowserWindow: vi.fn(),
-  Tray: vi.fn(),
 }));
 
 vi.mock('electron-log', () => ({
@@ -45,10 +44,6 @@ vi.mock('../utils/platform/badgeHelpers.js', () => ({
 function fakeWindow() {
   return {} as unknown as Electron.BrowserWindow;
 }
-function fakeTray() {
-  return {} as unknown as Electron.Tray;
-}
-
 describe('badgeIcon feature', () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -59,17 +54,16 @@ describe('badgeIcon feature', () => {
   describe('default export', () => {
     it('delegates handler setup to setupBadgeHandlers', async () => {
       const win = fakeWindow();
-      const tray = fakeTray();
       const feature = await import('./badgeIcon.js');
 
-      feature.default(win, tray);
+      feature.default(win);
 
-      expect(setupBadgeHandlers).toHaveBeenCalledWith(win, tray);
+      expect(setupBadgeHandlers).toHaveBeenCalledWith(win);
     });
 
     it('returns void (cleanup is via named export)', async () => {
       const feature = await import('./badgeIcon.js');
-      const result = feature.default(fakeWindow(), fakeTray());
+      const result = feature.default(fakeWindow());
       expect(result).toBeUndefined();
     });
   });
@@ -82,7 +76,7 @@ describe('badgeIcon feature', () => {
 
     it('invokes every IPC, hook and session cleanup callback', async () => {
       const feature = await import('./badgeIcon.js');
-      feature.default(fakeWindow(), fakeTray());
+      feature.default(fakeWindow());
 
       feature.cleanupBadgeIcon();
 
@@ -93,7 +87,7 @@ describe('badgeIcon feature', () => {
 
     it('is idempotent — second call does not re-invoke cleanups', async () => {
       const feature = await import('./badgeIcon.js');
-      feature.default(fakeWindow(), fakeTray());
+      feature.default(fakeWindow());
 
       feature.cleanupBadgeIcon();
       feature.cleanupBadgeIcon();
@@ -110,7 +104,7 @@ describe('badgeIcon feature', () => {
         throw new Error('hook disposal failed');
       });
       const feature = await import('./badgeIcon.js');
-      feature.default(fakeWindow(), fakeTray());
+      feature.default(fakeWindow());
 
       expect(() => feature.cleanupBadgeIcon()).not.toThrow();
       feature.cleanupBadgeIcon();

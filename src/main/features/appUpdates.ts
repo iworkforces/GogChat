@@ -306,7 +306,7 @@ function canRunUpdateFetch(): boolean {
 }
 
 /**
- * User-initiated “Check for Updates…” from Help / tray.
+ * User-initiated “Check for Updates…” from Help.
  * Always surfaces the native update dialog for terminal outcomes.
  */
 export async function checkForUpdatesManual(): Promise<void> {

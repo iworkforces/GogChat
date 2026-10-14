@@ -21,7 +21,7 @@
 - `lifecycle/` owns feature execution, cleanup tracking, errors, performance monitors/export/finalizer, local CDP JSON (`cdpMetrics`), optional config profiling, and context storage.
 - `ipc/` owns main-side handler wrappers (`defineIPC` for new handlers), rate limiting, dedup, fast-path send helpers, and validators.
 - `security/` owns shell wrappers, SafeStorage secure flags (e.g. CDP kill switch; residual cert-pin key unused for TLS), permission/CSP helpers, media access, **notification authorization** (`notificationAccess.ts`), and encryption key utilities. Custom certificate pinning is **not** owned here (feature removed; Chromium is TLS trust).
-- `platform/` owns tray, badges, native notification **presentation** (`nativeNotification`, `notificationFocus`, account label/identity helpers), unread-delta visibility gate, icon cache, dock/menu helpers, window defaults, **native About/Update dialog chrome** (`dialogChrome.ts`, `updateWindow.ts`), and help-menu builders (shared across arm64/x64 packaging arches).
+- `platform/` owns dock/app badges (startup does not create a menu-bar tray), native notification **presentation** (`nativeNotification`, `notificationFocus`, account label/identity helpers), unread-delta visibility gate, icon cache, dock/menu helpers, window defaults, **native About/Update dialog chrome** (`dialogChrome.ts`, `updateWindow.ts`), and help-menu builders (shared across arm64/x64 packaging arches).
 - `config/` owns typed electron-store schema/cache helpers only; secure flags are not config.
 
 ## Resource rules

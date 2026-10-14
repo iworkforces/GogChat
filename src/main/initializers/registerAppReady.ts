@@ -59,12 +59,9 @@ export function registerAppReady(options: AppReadyOptions): void {
   const { windowFactory, setMainWindow, getMainWindow, registerCleanupTask } = options;
 
   // The runtime feature context is shared between phases (each phase mutates
-  // it via callbacks.updateContext, e.g., trayIcon → badgeIcons).
+  // it via callbacks.updateContext).
   const context: FeatureContext = {};
   const callbacks: FeatureCallbacks = {
-    setTrayIcon: () => {
-      // Tray icon registration is purely contextual now (consumed via context.trayIcon).
-    },
     registerCleanupTask,
     updateContext: (patch) => Object.assign(context, patch),
   };
@@ -215,7 +212,7 @@ export function registerAppReady(options: AppReadyOptions): void {
       // Defer non-critical features using setImmediate.
       // warmInitialIcons is moved here (off the critical path) — the window icon (256.png)
       // is already loaded on-demand in windowWrapper via getIconCache().getIcon().
-      // All other warmed icons are consumed by deferred-only features (tray, badges, inOnline).
+      // All other warmed icons are consumed by deferred-only features (badges, inOnline).
       // Dynamic import keeps cacheWarmer + configProfiler out of lib/main/index.js
       // (mainBundleSize budget).
       setImmediate(() => {

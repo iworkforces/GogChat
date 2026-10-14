@@ -1,7 +1,7 @@
 /**
  * Flush live account-window bounds, then end the process.
  *
- * File Quit, tray Quit, and Relaunch call `app.exit()`. That does not emit
+ * File Quit and Relaunch call `app.exit()`. That does not emit
  * `before-quit`, so the shutdown stage never reads the open windows. The
  * 500ms move/resize timer would otherwise die with the process.
  *
@@ -34,7 +34,7 @@ export function persistAccountWindowsBeforeExit(): Promise<void> {
   });
 }
 
-/** Persist, then `app.exit()`. Menu Quit and tray Quit use this. */
+/** Persist, then `app.exit()`. Menu Quit uses this. */
 export async function exitAppAfterSavingWindows(): Promise<void> {
   await persistAccountWindowsBeforeExit();
   app.exit();

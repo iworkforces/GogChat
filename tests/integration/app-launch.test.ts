@@ -48,16 +48,6 @@ test.describe('App Launch', () => {
     expect(isTestDocumentUrl(url)).toBe(true);
   });
 
-  test('should create system tray icon', async ({ electronApp }) => {
-    // Check if tray exists
-    const hasTray = await electronApp.evaluate(({ Tray }) => {
-      // This would need actual implementation to track tray instances
-      return true; // Simplified for now
-    });
-
-    expect(hasTray).toBe(true);
-  });
-
   test('should have application menu', async ({ electronApp }) => {
     // Menu is installed in the deferred phase; poll instead of snapshotting boot.
     const deadline = Date.now() + 15_000;
@@ -92,7 +82,7 @@ test.describe('App Launch', () => {
     expect(bounds?.height).toBeGreaterThanOrEqual(570);
   });
 
-  test('should handle window close to tray', async ({ electronApp }) => {
+  test('should keep the main window alive after hide', async ({ electronApp }) => {
     await electronApp.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
       window?.hide();

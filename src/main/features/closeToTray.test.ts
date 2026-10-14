@@ -20,6 +20,7 @@ function makeFakeWindow() {
     isDestroyed: () => boolean;
     hide: ReturnType<typeof vi.fn>;
     show: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
     on: (event: string, handler: (...args: unknown[]) => void) => void;
     removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
     _destroyed: boolean;
@@ -30,6 +31,7 @@ function makeFakeWindow() {
   win.isDestroyed = () => win._destroyed;
   win.hide = vi.fn();
   win.show = vi.fn();
+  win.destroy = vi.fn();
   win.on = vi.fn((event: string, handler: (...args: unknown[]) => void) => {
     win.addListener(event, handler);
   });
@@ -159,6 +161,8 @@ describe('closeToTray feature', () => {
       closeHandler!({ preventDefault } as unknown as Electron.Event);
 
       expect(preventDefault).toHaveBeenCalled();
+      expect(win.isDestroyed()).toBe(false);
+      expect(win.destroy).not.toHaveBeenCalled();
     });
 
     it('calls hide on macOS', async () => {
@@ -199,8 +203,10 @@ describe('closeToTray feature', () => {
       const preventDefault = vi.fn();
       closeHandler!({ preventDefault } as unknown as Electron.Event);
 
-      // Should NOT prevent default when quitting
+      // Dock Quit is not cancelled, and the window is allowed to close.
       expect(preventDefault).not.toHaveBeenCalled();
+      const { app: electronApp } = await import('electron');
+      expect(electronApp.hide).not.toHaveBeenCalled();
     });
 
     it('dehydrates sparse non-zero accounts (e.g. {0, 2}) without needing index 1', async () => {

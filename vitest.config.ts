@@ -40,7 +40,6 @@ export default defineConfig({
         'src/main/features/externalLinks.ts',
         'src/main/features/handleNotification.ts',
         'src/main/features/windowState.ts',
-        'src/main/features/trayIcon.ts',
         'src/main/features/aboutPanel.ts',
         'src/main/features/openAtLogin.ts',
         'src/main/features/firstLaunch.ts',

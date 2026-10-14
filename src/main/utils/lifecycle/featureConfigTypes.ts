@@ -7,7 +7,7 @@
  * @module featureConfigTypes
  */
 
-import type { BrowserWindow, Tray } from 'electron';
+import type { BrowserWindow } from 'electron';
 import type { IAccountWindowManager } from '../../../shared/types/window.js';
 import type { IPCChannelName } from '../../../shared/constants.js';
 import type { PlatformName } from '../platform/platformDetection.js';
@@ -25,7 +25,6 @@ export type FeaturePriority = 'security' | 'critical' | 'ui' | 'deferred';
  * Side-effect callbacks that features may invoke. Wired by app entry.
  */
 export interface FeatureCallbacks {
-  setTrayIcon: (icon: Tray | null) => void;
   registerCleanupTask: (name: string, cleanup: () => void | Promise<void>) => void;
   updateContext: (patch: Partial<FeatureContext>) => void;
 }
@@ -35,7 +34,6 @@ export interface FeatureCallbacks {
  */
 export interface FeatureContext {
   mainWindow?: BrowserWindow | null;
-  trayIcon?: Tray | null;
   accountWindowManager?: IAccountWindowManager;
   callbacks?: FeatureCallbacks;
 }

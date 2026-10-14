@@ -1,17 +1,9 @@
 /**
- * Shared tray icon state — extracted from features/trayIcon.ts so that
- * badge helpers (utils/platform/badgeHelpers.ts) can toggle the tray unread dot
- * without taking a feature→feature import on the trayIcon feature.
+ * Tray image helpers. Startup and badge presentation do not call these.
+ * `PlatformUtils.createTrayIcon` is likewise unused by startup.
  *
- * Owns:
- *   • Module-local Tray instance reference (set by trayIcon feature on init,
- *     cleared on cleanup).
- *   • setTrayUnread() — flips between the default Template icon and the
- *     unread-dot Template icon, no-ops when the state is unchanged or the
- *     tray instance is missing/destroyed.
- *   • Image getters for the two tray icon variants (kept here so the
- *     feature lifecycle and the unread toggle share a single source of
- *     truth for the icon assets).
+ * Owns image getters for the template tray assets. Nothing in startup calls
+ * them, and badge presentation does not swap tray images.
  */
 
 import type { NativeImage, Tray } from 'electron';
@@ -38,8 +30,8 @@ export function getTrayUnreadImage(): NativeImage {
 }
 
 /**
- * Register the active Tray instance. Called by the trayIcon feature on init.
- * Pass `null` from the cleanup path to clear the reference and reset state.
+ * Register a Tray instance. Startup does not call this.
+ * Pass `null` to clear the reference and reset state.
  */
 export function setTrayInstance(tray: Tray | null): void {
   trayInstance = tray;
