@@ -66,7 +66,7 @@ Hotspots (>400 prod lines): `accountViewManager.ts` (805), `accountWindowManager
 
 ## CONVENTIONS
 
-- **bun only** (`packageManager: bun@1.4.2`). Node `>=24.16.0 <25.0.0`. Electron `^44.3.0`.
+- **bun only** (`packageManager: bun@1.4.3`). Node `>=24.16.0 <25.0.0`. Electron `^44.3.0`.
 - Typecheck is `@typescript/native` (TS 7), not the `typescript` 6.x package (used by feature-plan parser).
 - NodeNext `.js` specifiers. `import type`. `asType` / branded helpers — no `as any` / `@ts-ignore`.
 - Feature-to-feature imports forbidden except `menuActionRegistry.ts`.
