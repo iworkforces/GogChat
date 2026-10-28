@@ -97,7 +97,7 @@ The preload build must remain CommonJS because Electron sandboxed preload script
 
 - macOS (Apple Silicon preferred for local development)
 - Node.js `>=24.16.0 <25.0.0`
-- Bun `>=1.3.0` (repository package manager: `bun@1.4.3`)
+- Bun `>=1.3.0` (repository package manager: `bun@1.4.4`)
 
 ### Setup
 
@@ -211,7 +211,7 @@ Notarization is handled by the electron-builder hooks when Apple credentials are
 | --------------- | --------------------------------------------- |
 | Runtime         | Electron `^44.3.0`                            |
 | Language        | TypeScript 7 typecheck (`@typescript/native`) |
-| Package manager | Bun `1.4.3`                                   |
+| Package manager | Bun `1.4.4`                                   |
 | Build           | Rsbuild / Rspack                              |
 | Tests           | Vitest 5, Playwright                          |
 | Packaging       | electron-builder                              |
