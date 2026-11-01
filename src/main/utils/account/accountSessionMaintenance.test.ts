@@ -20,7 +20,9 @@ const {
   mockAppOn,
   mockAppRemoveListener,
   appListeners,
+  maintenanceConfig,
 } = vi.hoisted(() => {
+  const maintenanceConfig = { mode: undefined as unknown, throwOnRead: false };
   const mockClearCodeCaches = vi.fn().mockResolvedValue(undefined);
   const mockClearCache = vi.fn().mockResolvedValue(undefined);
   const mockClearStorageData = vi.fn().mockResolvedValue(undefined);
@@ -47,6 +49,7 @@ const {
     mockAppOn,
     mockAppRemoveListener,
     appListeners,
+    maintenanceConfig,
   };
 });
 
@@ -60,6 +63,15 @@ vi.mock('electron', () => ({
   },
 }));
 
+vi.mock('../../config.js', () => ({
+  configGet: vi.fn((key: string) => {
+    if (maintenanceConfig.throwOnRead) {
+      throw new Error('Store not initialized');
+    }
+    return key === 'app.sessionMaintenanceMode' ? maintenanceConfig.mode : undefined;
+  }),
+}));
+
 vi.mock('electron-log', () => ({
   default: {
     info: vi.fn(),
@@ -69,8 +81,10 @@ vi.mock('electron-log', () => ({
   },
 }));
 
+import log from 'electron-log';
 import {
   AccountActivityTracker,
+  installSessionMaintenanceTestHooks,
   startSessionMaintenance,
   stopSessionMaintenance,
   getAccountActivityTracker,
@@ -653,5 +667,270 @@ describe('startSessionMaintenance — memory pressure handler', () => {
     firePressure();
 
     expect(dehydrateAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe('session maintenance mode policy', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    maintenanceConfig.mode = undefined;
+    maintenanceConfig.throwOnRead = false;
+    mockClearCodeCaches.mockClear();
+    mockClearCache.mockClear();
+    mockClearStorageData.mockClear();
+    mockFromPartition.mockClear();
+    mockAppOn.mockClear();
+    mockAppRemoveListener.mockClear();
+    appListeners.clear();
+    vi.mocked(log.debug).mockClear();
+    vi.mocked(log.warn).mockClear();
+    destroyAccountActivityTracker();
+  });
+
+  afterEach(() => {
+    stopSessionMaintenance();
+    destroyAccountActivityTracker();
+    vi.useRealTimers();
+  });
+
+  function startOne(
+    overrides: Partial<IAccountWindowManager> = {},
+    ...accounts: number[]
+  ): { tracker: AccountActivityTracker; manager: IAccountWindowManager } {
+    const tracker = new AccountActivityTracker();
+    const manager = makeManager(overrides);
+    for (const account of accounts) {
+      tracker.recordActivity(account);
+    }
+    startSessionMaintenance(tracker, manager);
+    return { tracker, manager };
+  }
+
+  function firePressure(): void {
+    for (const handler of appListeners.get('memory-pressure') ?? []) {
+      handler();
+    }
+  }
+
+  it.each([
+    ['a fresh or older store without the key', undefined],
+    ['an unrecognised value', 'aggressive'],
+    ['the default value', 'default'],
+  ])("keeps today's behavior for %s", (_label, mode) => {
+    maintenanceConfig.mode = mode;
+    startOne({}, 0);
+
+    vi.advanceTimersByTime(TWO_HOURS - 1);
+    expect(mockClearCache).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(mockClearCache).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(SIX_HOURS - TWO_HOURS);
+    expect(mockClearStorageData).toHaveBeenCalledWith({ storages: ['serviceworkers'] });
+  });
+
+  it("keeps today's behavior when the preference cannot be read", () => {
+    maintenanceConfig.throwOnRead = true;
+    startOne({}, 0);
+
+    vi.advanceTimersByTime(TWO_HOURS);
+
+    expect(mockClearCodeCaches).toHaveBeenCalled();
+    expect(mockClearCache).toHaveBeenCalledTimes(1);
+    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining('maintenance mode unreadable'));
+  });
+
+  it('starts no periodic HTTP-cache or service-worker clearing in conservative mode', () => {
+    maintenanceConfig.mode = 'conservative';
+    startOne({}, 0, 1);
+
+    vi.advanceTimersByTime(SIX_HOURS);
+
+    expect(mockClearCache).not.toHaveBeenCalled();
+    expect(mockClearStorageData).not.toHaveBeenCalled();
+    expect(mockFromPartition).toHaveBeenCalledWith('persist:account-0');
+    expect(mockFromPartition).toHaveBeenCalledWith('persist:account-1');
+    expect(mockClearCodeCaches).toHaveBeenCalledTimes(2 * (SIX_HOURS / FIVE_MIN - 5));
+  });
+
+  it('keeps the 30-minute code-cache tier and bootstrap exclusions in conservative mode', () => {
+    maintenanceConfig.mode = 'conservative';
+    const getBootstrapAccounts = vi.fn().mockReturnValue([1]);
+    startOne({ getBootstrapAccounts }, 0, 1);
+
+    vi.advanceTimersByTime(THIRTY_MIN - FIVE_MIN);
+    expect(mockClearCodeCaches).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(FIVE_MIN);
+
+    expect(mockClearCodeCaches).toHaveBeenCalledTimes(1);
+    expect(mockFromPartition).toHaveBeenCalledTimes(1);
+    expect(mockFromPartition).toHaveBeenCalledWith('persist:account-0');
+    expect(mockFromPartition).not.toHaveBeenCalledWith('persist:account-1');
+  });
+
+  it('applies a switch to conservative on the next tick without restarting the scheduler', () => {
+    startOne({}, 0);
+
+    vi.advanceTimersByTime(TWO_HOURS - FIVE_MIN);
+    expect(mockClearCache).not.toHaveBeenCalled();
+    maintenanceConfig.mode = 'conservative';
+    vi.advanceTimersByTime(FIVE_MIN);
+    expect(mockClearCache).not.toHaveBeenCalled();
+
+    maintenanceConfig.mode = 'default';
+    vi.advanceTimersByTime(FIVE_MIN - 1);
+    expect(mockClearCache).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(mockClearCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies a switch to conservative at the exact service-worker boundary', () => {
+    startOne({}, 0);
+
+    vi.advanceTimersByTime(SIX_HOURS - FIVE_MIN);
+    const httpClearsBeforeSwitch = mockClearCache.mock.calls.length;
+    expect(httpClearsBeforeSwitch).toBeGreaterThan(0);
+    expect(mockClearStorageData).not.toHaveBeenCalled();
+
+    maintenanceConfig.mode = 'conservative';
+    vi.advanceTimersByTime(FIVE_MIN);
+
+    expect(mockClearStorageData).not.toHaveBeenCalled();
+    expect(mockClearCache).toHaveBeenCalledTimes(httpClearsBeforeSwitch);
+    expect(mockClearCodeCaches).toHaveBeenCalledTimes(SIX_HOURS / FIVE_MIN - 5);
+  });
+
+  it('lets an already-issued clear finish after the mode changes without issuing more', () => {
+    let finishClear!: () => void;
+    mockClearCache.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishClear = resolve;
+        })
+    );
+    startOne({}, 0);
+
+    vi.advanceTimersByTime(TWO_HOURS);
+    expect(mockClearCache).toHaveBeenCalledTimes(1);
+
+    maintenanceConfig.mode = 'conservative';
+    vi.advanceTimersByTime(FIVE_MIN * 3);
+    expect(mockClearCache).toHaveBeenCalledTimes(1);
+
+    finishClear();
+    return Promise.resolve().then(() => {
+      expect(log.debug).toHaveBeenCalledWith(expect.stringContaining('Cleared HTTP cache'));
+      expect(log.warn).not.toHaveBeenCalled();
+      expect(mockClearCache).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('keeps memory-pressure dehydration armed in conservative mode', () => {
+    maintenanceConfig.mode = 'conservative';
+    const dehydrateAccount = vi.fn();
+    const isBootstrap = vi.fn((idx: number) => idx === 1);
+    startOne({ dehydrateAccount, isBootstrap }, 0, 1, 2);
+
+    vi.advanceTimersByTime(30 * 1000);
+    firePressure();
+
+    expect(dehydrateAccount).toHaveBeenCalledTimes(1);
+    expect(dehydrateAccount).toHaveBeenCalledWith(2);
+    expect(mockClearCache).not.toHaveBeenCalled();
+    expect(mockClearStorageData).not.toHaveBeenCalled();
+  });
+
+  it('keeps single-owner start and stop semantics in conservative mode', () => {
+    maintenanceConfig.mode = 'conservative';
+    const tracker = new AccountActivityTracker();
+    const owner = makeManager();
+    const other = makeManager();
+    tracker.recordActivity(0);
+    startSessionMaintenance(tracker, owner);
+    startSessionMaintenance(tracker, other);
+    expect(appListeners.get('memory-pressure')?.size).toBe(1);
+
+    stopSessionMaintenance(other);
+    vi.advanceTimersByTime(THIRTY_MIN);
+    expect(mockClearCodeCaches).toHaveBeenCalledTimes(1);
+    expect(appListeners.get('memory-pressure')?.size).toBe(1);
+
+    stopSessionMaintenance(owner);
+    stopSessionMaintenance(owner);
+    stopSessionMaintenance();
+    mockClearCodeCaches.mockClear();
+    vi.advanceTimersByTime(SIX_HOURS);
+    expect(mockClearCodeCaches).not.toHaveBeenCalled();
+    expect(appListeners.get('memory-pressure')?.size).toBe(0);
+  });
+
+  it('final teardown stops ticks and pressure handling regardless of mode', () => {
+    maintenanceConfig.mode = 'conservative';
+    const dehydrateAccount = vi.fn();
+    const tracker = getAccountActivityTracker();
+    tracker.recordActivity(1);
+    startSessionMaintenance(tracker, makeManager({ dehydrateAccount }));
+
+    destroyAccountActivityTracker();
+    vi.advanceTimersByTime(SIX_HOURS);
+    firePressure();
+
+    expect(mockClearCodeCaches).not.toHaveBeenCalled();
+    expect(dehydrateAccount).not.toHaveBeenCalled();
+    expect(appListeners.get('memory-pressure')?.size).toBe(0);
+  });
+
+  describe('Playwright tick hook', () => {
+    const globals = globalThis as typeof globalThis & {
+      __gogchatRunSessionMaintenanceTick?: () => void;
+    };
+    let previousTesting: string | undefined;
+
+    beforeEach(() => {
+      previousTesting = process.env['TESTING'];
+      delete globals.__gogchatRunSessionMaintenanceTick;
+    });
+
+    afterEach(() => {
+      delete globals.__gogchatRunSessionMaintenanceTick;
+      if (previousTesting === undefined) {
+        delete process.env['TESTING'];
+      } else {
+        process.env['TESTING'] = previousTesting;
+      }
+    });
+
+    it('is absent outside TESTING', () => {
+      delete process.env['TESTING'];
+      installSessionMaintenanceTestHooks();
+      expect(globals.__gogchatRunSessionMaintenanceTick).toBeUndefined();
+    });
+
+    it('runs one policy-aware tick against the started owner and singleton tracker', () => {
+      process.env['TESTING'] = 'true';
+      installSessionMaintenanceTestHooks();
+      const run = globals.__gogchatRunSessionMaintenanceTick;
+      expect(run).toEqual(expect.any(Function));
+
+      expect(() => run?.()).not.toThrow();
+      expect(mockFromPartition).not.toHaveBeenCalled();
+
+      const tracker = getAccountActivityTracker();
+      tracker.recordActivity(0);
+      startSessionMaintenance(tracker, makeManager());
+      vi.setSystemTime(Date.now() + SIX_HOURS);
+
+      maintenanceConfig.mode = 'conservative';
+      run?.();
+      expect(mockClearCodeCaches).toHaveBeenCalledTimes(1);
+      expect(mockClearCache).not.toHaveBeenCalled();
+      expect(mockClearStorageData).not.toHaveBeenCalled();
+
+      maintenanceConfig.mode = 'default';
+      run?.();
+      expect(mockClearCache).toHaveBeenCalledTimes(1);
+      expect(mockClearStorageData).toHaveBeenCalledTimes(1);
+    });
   });
 });

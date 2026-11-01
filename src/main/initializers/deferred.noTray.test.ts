@@ -41,6 +41,10 @@ vi.mock('electron', () => ({
   },
 }));
 
+vi.mock('../config.js', () => ({
+  configGet: vi.fn(),
+}));
+
 vi.mock('electron-log', () => ({
   default: {
     info: vi.fn(),

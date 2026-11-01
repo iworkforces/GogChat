@@ -13,6 +13,7 @@
 
 import { app, session } from 'electron';
 import log from 'electron-log';
+import { configGet } from '../../config.js';
 import { cancelTrackedInterval, createTrackedInterval } from '../lifecycle/resourceCleanup.js';
 import { toErrorMessage } from '../lifecycle/errorUtils.js';
 import { asType } from '../../../shared/typeUtils.js';
@@ -133,6 +134,108 @@ let maintenanceInterval: NodeJS.Timeout | null = null;
 let pressureHandler: (() => void) | null = null;
 let maintenanceOwner: IAccountWindowManager | null = null;
 
+/** Read on every tick so a Preferences change applies without restarting the scheduler. */
+function isConservativeMode(): boolean {
+  try {
+    return configGet('app.sessionMaintenanceMode') === 'conservative';
+  } catch (error: unknown) {
+    log.debug(
+      `[AccountSessionMaintenance] maintenance mode unreadable, using default: ${toErrorMessage(error)}`
+    );
+    return false;
+  }
+}
+
+function runMaintenanceTick(tracker: AccountActivityTracker, manager: IAccountWindowManager): void {
+  // Build the active-accounts exclusion set once per tick. Bootstrap
+  // accounts must never have their caches touched mid-auth.
+  const bootstrapAccounts = new Set<AccountIndex>(manager.getBootstrapAccounts());
+
+  // Single-pass classification of all idle accounts across the three tiers.
+  // Bootstrap accounts are excluded by the set, so per-tier `isBootstrap`
+  // re-checks are unnecessary inside the loops below.
+  const {
+    tier1: idleAccounts,
+    tier2: twoHourIdle,
+    tier3: sixHourIdle,
+  } = tracker.classifyIdleAccounts(
+    {
+      t1: IDLE_THRESHOLD_MS,
+      t2: HTTP_CACHE_IDLE_THRESHOLD_MS,
+      t3: SERVICE_WORKER_IDLE_THRESHOLD_MS,
+    },
+    bootstrapAccounts
+  );
+
+  // Conservative mode skips only the periodic HTTP-cache and service-worker
+  // tiers; the code-cache tier and the pressure path are unaffected.
+  const conservative = isConservativeMode();
+  const httpCacheIdle = conservative ? [] : twoHourIdle;
+  const serviceWorkerIdle = conservative ? [] : sixHourIdle;
+
+  // ── Tier 1 — V8 code cache (idle >= 30 min) ─────────────────────
+  for (const accountIndex of idleAccounts) {
+    try {
+      const partition = toPartition(accountIndex);
+      void session.fromPartition(partition).clearCodeCaches({ urls: [] });
+      log.debug(`[AccountSessionMaintenance] Cleared code cache for idle account ${accountIndex}`);
+    } catch (error: unknown) {
+      log.debug(
+        `[AccountSessionMaintenance] clearCodeCaches failed for account ${accountIndex}: ${toErrorMessage(error)}`,
+        error
+      );
+    }
+  }
+
+  // ── Tier 2 — Full HTTP cache (idle >= 2 hours) ────────
+  for (const accountIndex of httpCacheIdle) {
+    try {
+      const partition = toPartition(accountIndex);
+      void session
+        .fromPartition(partition)
+        .clearCache()
+        .then(() => {
+          log.debug(
+            `[AccountSessionMaintenance] Cleared HTTP cache for idle account ${accountIndex}`
+          );
+        })
+        .catch((err: unknown) => {
+          log.warn(
+            `[AccountSessionMaintenance] clearCache failed for account ${accountIndex}: ${toErrorMessage(err)}`
+          );
+        });
+    } catch (error: unknown) {
+      log.warn(
+        `[AccountSessionMaintenance] clearCache failed for account ${accountIndex}: ${toErrorMessage(error)}`
+      );
+    }
+  }
+
+  // ── Tier 3 — Service worker storage (idle >= 6 hours) ─
+  for (const accountIndex of serviceWorkerIdle) {
+    try {
+      const partition = toPartition(accountIndex);
+      void session
+        .fromPartition(partition)
+        .clearStorageData({ storages: ['serviceworkers'] })
+        .then(() => {
+          log.info(
+            `[AccountSessionMaintenance] Cleared service workers for idle account ${accountIndex}`
+          );
+        })
+        .catch((err: unknown) => {
+          log.warn(
+            `[AccountSessionMaintenance] clearStorageData(serviceworkers) failed for account ${accountIndex}: ${toErrorMessage(err)}`
+          );
+        });
+    } catch (error: unknown) {
+      log.warn(
+        `[AccountSessionMaintenance] clearStorageData(serviceworkers) failed for account ${accountIndex}: ${toErrorMessage(error)}`
+      );
+    }
+  }
+}
+
 /**
  * Start the periodic maintenance scheduler.
  *
@@ -152,89 +255,7 @@ export function startSessionMaintenance(
   maintenanceOwner = manager;
   maintenanceInterval = createTrackedInterval(
     () => {
-      // Build the active-accounts exclusion set once per tick. Bootstrap
-      // accounts must never have their caches touched mid-auth.
-      const bootstrapAccounts = new Set<AccountIndex>(manager.getBootstrapAccounts());
-
-      // Single-pass classification of all idle accounts across the three tiers.
-      // Bootstrap accounts are excluded by the set, so per-tier `isBootstrap`
-      // re-checks are unnecessary inside the loops below.
-      const {
-        tier1: idleAccounts,
-        tier2: twoHourIdle,
-        tier3: sixHourIdle,
-      } = tracker.classifyIdleAccounts(
-        {
-          t1: IDLE_THRESHOLD_MS,
-          t2: HTTP_CACHE_IDLE_THRESHOLD_MS,
-          t3: SERVICE_WORKER_IDLE_THRESHOLD_MS,
-        },
-        bootstrapAccounts
-      );
-
-      // ── Tier 1 — V8 code cache (idle >= 30 min) ─────────────────────
-      for (const accountIndex of idleAccounts) {
-        try {
-          const partition = toPartition(accountIndex);
-          void session.fromPartition(partition).clearCodeCaches({ urls: [] });
-          log.debug(
-            `[AccountSessionMaintenance] Cleared code cache for idle account ${accountIndex}`
-          );
-        } catch (error: unknown) {
-          log.debug(
-            `[AccountSessionMaintenance] clearCodeCaches failed for account ${accountIndex}: ${toErrorMessage(error)}`,
-            error
-          );
-        }
-      }
-
-      // ── Tier 2 — Full HTTP cache (idle >= 2 hours) ────────
-      for (const accountIndex of twoHourIdle) {
-        try {
-          const partition = toPartition(accountIndex);
-          void session
-            .fromPartition(partition)
-            .clearCache()
-            .then(() => {
-              log.debug(
-                `[AccountSessionMaintenance] Cleared HTTP cache for idle account ${accountIndex}`
-              );
-            })
-            .catch((err: unknown) => {
-              log.warn(
-                `[AccountSessionMaintenance] clearCache failed for account ${accountIndex}: ${toErrorMessage(err)}`
-              );
-            });
-        } catch (error: unknown) {
-          log.warn(
-            `[AccountSessionMaintenance] clearCache failed for account ${accountIndex}: ${toErrorMessage(error)}`
-          );
-        }
-      }
-
-      // ── Tier 3 — Service worker storage (idle >= 6 hours) ─
-      for (const accountIndex of sixHourIdle) {
-        try {
-          const partition = toPartition(accountIndex);
-          void session
-            .fromPartition(partition)
-            .clearStorageData({ storages: ['serviceworkers'] })
-            .then(() => {
-              log.info(
-                `[AccountSessionMaintenance] Cleared service workers for idle account ${accountIndex}`
-              );
-            })
-            .catch((err: unknown) => {
-              log.warn(
-                `[AccountSessionMaintenance] clearStorageData(serviceworkers) failed for account ${accountIndex}: ${toErrorMessage(err)}`
-              );
-            });
-        } catch (error: unknown) {
-          log.warn(
-            `[AccountSessionMaintenance] clearStorageData(serviceworkers) failed for account ${accountIndex}: ${toErrorMessage(error)}`
-          );
-        }
-      }
+      runMaintenanceTick(tracker, manager);
     },
     MAINTENANCE_INTERVAL_MS,
     'accountSessionMaintenance'
@@ -334,3 +355,21 @@ export function destroyAccountActivityTracker(): void {
     tracker = null;
   }
 }
+
+type MaintenanceTestGlobal = typeof globalThis & {
+  __gogchatRunSessionMaintenanceTick?: () => void;
+};
+
+/** Playwright seam: run one tick now instead of waiting five minutes. Installed only when `TESTING=true`. */
+export function installSessionMaintenanceTestHooks(): void {
+  if (process.env['TESTING'] !== 'true') {
+    return;
+  }
+  asType<MaintenanceTestGlobal>(globalThis).__gogchatRunSessionMaintenanceTick = (): void => {
+    if (maintenanceOwner) {
+      runMaintenanceTick(getAccountActivityTracker(), maintenanceOwner);
+    }
+  };
+}
+
+installSessionMaintenanceTestHooks();
