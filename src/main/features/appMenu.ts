@@ -1,10 +1,13 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from 'electron';
 import { Menu, clipboard } from 'electron';
-import store, { configGet } from '../config.js';
+import log from 'electron-log';
+import store, { configGet, configSet } from '../config.js';
 import environment from '../../environment.js';
 import { IPC_CHANNELS } from '../../shared/constants.js';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import { asAccountIndex } from '../../shared/types/branded.js';
-import { getMenuAction } from './menuActionRegistry.js';
+import type { SessionMaintenanceMode } from '../../shared/types/config.js';
+import { getMenuAction, registerMenuAction } from './menuActionRegistry.js';
 import { buildHelpSubMenu, relaunchApp } from '../utils/platform/helpMenuBuilder.js';
 import { supports } from '../utils/platform/platformDetection.js';
 import { showNotificationSettingsDialog } from '../utils/security/notificationAccess.js';
@@ -98,8 +101,31 @@ function buildAccountLabelsSubmenu(
   };
 }
 
+let menuWindow: BrowserWindow | null = null;
+
+function runUpdateSnoozeAction(
+  id: 'snoozeUpdatePrompts' | 'resumeUpdatePrompts',
+  window: BrowserWindow
+): void {
+  if (getMenuAction(id)?.handler()) {
+    setAppMenu(window);
+  }
+}
+
+function selectSessionMaintenanceMode(mode: SessionMaintenanceMode, window: BrowserWindow): void {
+  try {
+    configSet('app.sessionMaintenanceMode', mode);
+  } catch (err: unknown) {
+    log.error('[AppMenu] Failed to persist session maintenance mode:', sanitizeLogError(err));
+    setAppMenu(window);
+  }
+}
+
 function setAppMenu(window: BrowserWindow): void {
+  menuWindow = window;
   const autoLaunchSupported = supports.autoLaunch();
+  const updatesSnoozed = (configGet('app.updateSnoozedUntil') ?? 0) > Date.now();
+  const maintenanceMode = configGet('app.sessionMaintenanceMode') ?? 'default';
   const menuItems = Menu.buildFromTemplate([
     {
       label: 'File',
@@ -241,6 +267,20 @@ function setAppMenu(window: BrowserWindow): void {
           },
         },
         {
+          label: 'Snooze Update Prompts for 24 Hours',
+          enabled: !updatesSnoozed,
+          click: () => {
+            runUpdateSnoozeAction('snoozeUpdatePrompts', window);
+          },
+        },
+        {
+          label: 'Resume Update Prompts',
+          enabled: updatesSnoozed,
+          click: () => {
+            runUpdateSnoozeAction('resumeUpdatePrompts', window);
+          },
+        },
+        {
           label: 'Auto Launch at Login',
           type: 'checkbox',
           enabled: autoLaunchSupported,
@@ -300,6 +340,27 @@ function setAppMenu(window: BrowserWindow): void {
             store.set('app.unreadDeltaNotifications', menuItem.checked);
           },
         },
+        {
+          label: 'Session Maintenance',
+          submenu: [
+            {
+              label: 'Default',
+              type: 'radio',
+              checked: maintenanceMode === 'default',
+              click: () => {
+                selectSessionMaintenanceMode('default', window);
+              },
+            },
+            {
+              label: 'Conservative (keep idle HTTP caches and service workers)',
+              type: 'radio',
+              checked: maintenanceMode === 'conservative',
+              click: () => {
+                selectSessionMaintenanceMode('conservative', window);
+              },
+            },
+          ],
+        },
         buildAccountLabelsSubmenu(window, setAppMenu),
         {
           label: 'Notification Settings…',
@@ -314,5 +375,14 @@ function setAppMenu(window: BrowserWindow): void {
 
   Menu.setApplicationMenu(menuItems);
 }
+
+registerMenuAction('refreshApplicationMenu', {
+  label: 'Refresh Application Menu',
+  handler: () => {
+    if (menuWindow && !menuWindow.isDestroyed()) {
+      setAppMenu(menuWindow);
+    }
+  },
+});
 
 export default setAppMenu;
