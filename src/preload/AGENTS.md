@@ -36,11 +36,11 @@ Account webPreferences attach only `lib/preload/index.js`. Rsbuild still emits e
 ## Offline recovery (`offline.ts`)
 
 - Listens for DOM `app:checkIfOnline`, generates an opaque `attemptId`, and calls `window.gogchat.checkIfOnline(attemptId)` (ipc fallback sends `{ attemptId }`).
-- Subscribes to `onOnlineStatus` with `{ attemptId, online }`. Only the current attempt may settle:
-  - **true** → exactly one `window.location.replace(urls.appUrl)` transition.
-  - **false** → dispatch DOM-only `app:onlineCheckFailed` so the offline page restores retry UI. **Do not** `location.reload()`.
-- Older or unknown `attemptId` values must not clear the deadline, restore retry, or navigate.
-- Each check arms a 6,000 ms deadline; a newer check clears and rearms it. Timeout dispatches `app:onlineCheckFailed` once and invalidates that attempt so a late reply is ignored. Clear the deadline on a current response or unload.
+- Subscribes to `onOnlineStatus` with the validated discriminated `OnlineStatusData` (`{ attemptId, outcome }`, plus `httpStatus` only for `http-error`). The switch on `outcome` is exhaustive (`assertNever`). Only the current attempt may settle:
+  - **`online`** → exactly one `window.location.replace(urls.appUrl)` transition.
+  - **`http-error` / `network-error` / `timeout`** → dispatch DOM-only `CustomEvent` `app:onlineCheckFailed` with `detail` `{ outcome, httpStatus? }` so the offline page shows feedback and restores retry UI. **Do not** `location.reload()`.
+- Older or unknown `attemptId` values, and payloads that fail `validateOnlineStatusData` (legacy `online` boolean, unknown outcome, bad status), must not clear the deadline, restore retry, or navigate.
+- Each check arms a 6,000 ms deadline; a newer check clears and rearms it. Timeout dispatches `app:onlineCheckFailed` with `{ outcome: 'timeout' }` once (the same state as a main-side timeout) and invalidates that attempt so a late reply of any outcome is ignored. Clear the deadline on a current response or unload.
 - `beforeunload` removes the check listener, cancels the deadline/attempt, and unsubscribes from online status.
 - Keep the existing narrow bridge surface; never expose raw `ipcRenderer` to the offline page.
 
@@ -59,4 +59,4 @@ Account webPreferences attach only `lib/preload/index.js`. Rsbuild still emits e
 
 ## Tests
 
-Keep coverage around `index.test.ts`, `notificationBridge.test.ts`, `offline.test.ts`, unread count, favicon changes, passkey monitoring, search shortcut, and WebAuthn disabling when touching preload behavior. Offline recovery tests must assert zero reloads on false replies, one app-URL replace on the current successful attempt, ignored older/unknown/`timeout`-then-stale `attemptId`s, unload cancellation, and ipc fallback when `window.gogchat` is absent.
+Keep coverage around `index.test.ts`, `notificationBridge.test.ts`, `offline.test.ts`, unread count, favicon changes, passkey monitoring, search shortcut, and WebAuthn disabling when touching preload behavior. Offline recovery tests must assert zero reloads on failed replies (each category's DOM `detail`), one app-URL replace on the current successful attempt, ignored older/unknown/`timeout`-then-stale `attemptId`s, unload cancellation, and ipc fallback when `window.gogchat` is absent.

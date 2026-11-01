@@ -43,13 +43,21 @@ export interface OnlineCheckRequest {
 }
 
 /**
+ * Classified connectivity probe result. Mutually exclusive variants:
+ * only `http-error` carries a status, and no variant carries raw error text.
+ * `online` is the sole success (`response.ok`).
+ */
+export type OnlineProbeResult =
+  | { readonly outcome: 'online' }
+  | { readonly outcome: 'http-error'; readonly httpStatus: number }
+  | { readonly outcome: 'network-error' }
+  | { readonly outcome: 'timeout' };
+
+/**
  * Main → renderer connectivity probe result.
  * Preload must ignore a payload whose `attemptId` is not the in-flight attempt.
  */
-export interface OnlineStatusData {
-  readonly attemptId: string;
-  readonly online: boolean;
-}
+export type OnlineStatusData = OnlineProbeResult & { readonly attemptId: string };
 
 /**
  * Passkey authentication failure data

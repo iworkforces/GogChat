@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Conf from 'conf';
@@ -26,7 +26,81 @@ interface RetryProbe {
   requests: number;
   methods: (string | undefined)[];
   navigations: string[];
-  settle: (status: number) => void;
+  respond: (status: number) => void;
+  fail: () => void;
+}
+
+interface PageState {
+  marker: string;
+  history: number;
+  disabled: boolean;
+  text: string;
+  feedback: string;
+}
+
+const OFFLINE_CSP = "default-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'";
+const RAW_ERROR_TEXT = ['fetch failed', 'ECONNRESET', 'secret-token'];
+
+type MainApp = Parameters<typeof main>[0];
+
+function inPage<Result>(app: MainApp, script: string): Promise<Result> {
+  return app.evaluate((_electron, source: string) => {
+    const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
+    return probe.contents.executeJavaScript(source);
+  }, script) as Promise<Result>;
+}
+
+const clickRetry = (app: MainApp) =>
+  inPage<void>(app, `document.getElementById('retry-btn').click()`);
+
+const pageState = (app: MainApp) =>
+  inPage<PageState>(
+    app,
+    `({marker:window.__retryMarker,history:history.length,disabled:document.getElementById('retry-btn').disabled,text:document.getElementById('retry-btn').innerText,feedback:document.getElementById('retry-status').textContent})`
+  );
+
+const failureDetails = (app: MainApp) => inPage<unknown[]>(app, `window.__retryDetails`);
+
+async function waitForCalls(app: MainApp, calls: number) {
+  await expect
+    .poll(() => main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').calls), {
+      timeout: 5000,
+    })
+    .toBe(calls);
+}
+
+async function waitForFailures(app: MainApp, failures: number, timeout = 5000) {
+  await expect
+    .poll(() => inPage<number>(app, `window.__retryFailures`), { timeout })
+    .toBe(failures);
+}
+
+async function sendStatus(app: MainApp, payload: unknown) {
+  await app.evaluate((_electron, status: unknown) => {
+    const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
+    const channels: typeof IPC_CHANNELS = Reflect.get(globalThis, '__offlineRetryChannels');
+    probe.contents.send(channels.ONLINE_STATUS, status);
+  }, payload);
+}
+
+async function captureFeedback(app: MainApp, name: string) {
+  const screenshot = await main(app, async () => {
+    const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
+    return (await probe.contents.capturePage()).toPNG().toString('base64');
+  });
+  await writeFile(test.info().outputPath(name), Buffer.from(screenshot, 'base64'));
+}
+
+async function actualNetworkReachability(): Promise<string> {
+  try {
+    const response = await fetch('https://www.google.com/generate_204', {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(3000),
+    });
+    return `reachable: HTTP ${response.status} ok=${response.ok}`;
+  } catch {
+    return 'unreachable';
+  }
 }
 
 async function main<Result>(
@@ -129,7 +203,10 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
           requests: 0,
           methods: [],
           navigations: [],
-          settle: () => {
+          respond: () => {
+            throw new Error('No pending fetch');
+          },
+          fail: () => {
             throw new Error('No pending fetch');
           },
         };
@@ -142,13 +219,19 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
         globalThis.fetch = (_input, init) => {
           probe.calls++;
           probe.methods.push(init?.method);
-          return new Promise<Response>((resolve) => {
-            probe.settle = (status) => resolve(new Response(null, { status }));
+          return new Promise<Response>((resolve, reject) => {
+            probe.respond = (status) => resolve(new Response(null, { status }));
+            probe.fail = () => reject(new TypeError('fetch failed: ECONNRESET secret-token'));
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true }
+            );
           });
         };
         Reflect.set(globalThis, '__offlineRetryProbe', probe);
         await contents.executeJavaScript(
-          `window.__retryMarker = crypto.randomUUID(); window.__retryFailures = 0; window.addEventListener('app:onlineCheckFailed', () => window.__retryFailures++);`
+          `window.__retryMarker = crypto.randomUUID(); window.__retryFailures = 0; window.__retryDetails = []; window.addEventListener('app:onlineCheckFailed', (event) => { window.__retryFailures++; window.__retryDetails.push(event.detail ?? null); });`
         );
         return entry.backend;
       });
@@ -161,67 +244,77 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
       });
       expect(before.bridge).toBe('function');
       expect(before.logo).toBe(true);
-      const screenshot = await main(app, async () => {
-        const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
-        return (await probe.contents.capturePage()).toPNG().toString('base64');
+      await captureFeedback(app, `offline-${backend}.png`);
+
+      // Controlled responses: main-process fetch is stubbed, so each case below is a
+      // deterministic outcome through built preload and main, not real reachability.
+      await clickRetry(app);
+      await waitForCalls(app, 1);
+      expect(await pageState(app)).toEqual({
+        marker: before.marker,
+        history: before.history,
+        disabled: true,
+        text: 'Checking...',
+        feedback: '',
       });
-      await writeFile(
-        test.info().outputPath(`offline-${backend}.png`),
-        Buffer.from(screenshot, 'base64')
-      );
-      await main(app, async () => {
-        const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
-        await probe.contents.executeJavaScript(`document.getElementById('retry-btn').click()`);
+      await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').respond(503));
+      await waitForFailures(app, 1);
+      const httpFeedback = await pageState(app);
+      expect(httpFeedback).toMatchObject({
+        marker: before.marker,
+        history: before.history,
+        disabled: false,
+        text: 'Retry',
       });
-      await expect
-        .poll(() => main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').calls), {
-          timeout: 5000,
-        })
-        .toBe(1);
-      const pending = await main(app, () =>
-        Reflect.get(globalThis, '__offlineRetryProbe').contents.executeJavaScript(
-          `({disabled:document.getElementById('retry-btn').disabled,text:document.getElementById('retry-btn').innerText})`
-        )
-      );
-      expect(pending).toEqual({ disabled: true, text: 'Checking...' });
-      await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').settle(503));
-      await expect
-        .poll(
-          () =>
-            main(app, () =>
-              Reflect.get(globalThis, '__offlineRetryProbe').contents.executeJavaScript(
-                `window.__retryFailures`
-              )
-            ),
-          { timeout: 5000 }
-        )
-        .toBe(1);
-      const failed = await main(app, () => {
-        const probe: RetryProbe = Reflect.get(globalThis, '__offlineRetryProbe');
-        return probe.contents.executeJavaScript(
-          `({marker:window.__retryMarker,history:history.length,disabled:document.getElementById('retry-btn').disabled,text:document.getElementById('retry-btn').innerText})`
-        );
+      expect(httpFeedback.feedback).toContain('HTTP 503');
+      await captureFeedback(app, `offline-${backend}-http-error.png`);
+      await sendStatus(app, { attemptId: 'not-current', outcome: 'online' });
+      await sendStatus(app, { attemptId: 'legacy-shape', online: true });
+
+      await clickRetry(app);
+      await waitForCalls(app, 2);
+      await sendStatus(app, { attemptId: 'stale-while-pending', outcome: 'timeout' });
+      await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').fail());
+      await waitForFailures(app, 2);
+      const networkFeedback = await pageState(app);
+      expect(networkFeedback).toMatchObject({
+        marker: before.marker,
+        history: before.history,
+        disabled: false,
+        text: 'Retry',
       });
-      expect(failed).toEqual({
+      expect(networkFeedback.feedback).not.toBe('');
+      expect(networkFeedback.feedback).not.toBe(httpFeedback.feedback);
+      for (const raw of RAW_ERROR_TEXT) expect(networkFeedback.feedback).not.toContain(raw);
+      await captureFeedback(app, `offline-${backend}-network-error.png`);
+
+      await clickRetry(app);
+      await waitForCalls(app, 3);
+      await waitForFailures(app, 3, 12_000);
+      const timeoutFeedback = await pageState(app);
+      expect(timeoutFeedback).toMatchObject({
         marker: before.marker,
         history: before.history,
         disabled: false,
         text: 'Retry',
       });
       expect(
+        new Set([httpFeedback.feedback, networkFeedback.feedback, timeoutFeedback.feedback]).size
+      ).toBe(3);
+      await captureFeedback(app, `offline-${backend}-timeout.png`);
+
+      expect(await failureDetails(app)).toEqual([
+        { outcome: 'http-error', httpStatus: 503 },
+        { outcome: 'network-error' },
+        { outcome: 'timeout' },
+      ]);
+      expect(
         await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').navigations)
       ).toEqual([]);
-      await main(app, () =>
-        Reflect.get(globalThis, '__offlineRetryProbe').contents.executeJavaScript(
-          `document.getElementById('retry-btn').click()`
-        )
-      );
-      await expect
-        .poll(() => main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').calls), {
-          timeout: 5000,
-        })
-        .toBe(2);
-      await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').settle(204));
+
+      await clickRetry(app);
+      await waitForCalls(app, 4);
+      await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').respond(204));
       await expect
         .poll(
           () => main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').contents.getURL()),
@@ -245,10 +338,31 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
         };
       });
       expect(result).toEqual({
-        requests: 2,
-        methods: ['HEAD', 'HEAD'],
+        requests: 4,
+        methods: ['HEAD', 'HEAD', 'HEAD', 'HEAD'],
         navigations: ['https://chat.google.com/'],
         history: before.history,
+      });
+
+      test.info().annotations.push({
+        type: 'evidence-class',
+        description: `built-app controlled responses (stubbed main fetch) under ${backend}; not real network reachability`,
+      });
+      await test.info().attach(`controlled-responses-${backend}`, {
+        contentType: 'application/json',
+        body: JSON.stringify({
+          backend,
+          stubbedFetch: true,
+          feedback: {
+            httpError: httpFeedback.feedback,
+            networkError: networkFeedback.feedback,
+            timeout: timeoutFeedback.feedback,
+          },
+        }),
+      });
+      await test.info().attach(`actual-network-reachability-${backend}`, {
+        contentType: 'text/plain',
+        body: `${await actualNetworkReachability()} (informational; never asserted)`,
       });
     } finally {
       if (launched) await closeElectronApp(launched.app);
@@ -257,3 +371,18 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
     }
   });
 }
+
+test('built offline page keeps the classic self-contained bundle, siblings, and CSP', async () => {
+  const offline = join(import.meta.dirname, '../../lib/offline');
+  const html = await readFile(join(offline, 'index.html'), 'utf8');
+  const script = await readFile(join(offline, 'index.js'), 'utf8');
+  expect(html).toContain(`content="${OFFLINE_CSP}"`);
+  expect(html).toContain('<script src="index.js" async></script>');
+  expect(html).not.toMatch(/type=["']module["']/);
+  expect(html).toContain('id="retry-status"');
+  expect(await readdir(offline)).toEqual(
+    expect.arrayContaining(['index.html', 'index.css', 'index.js', 'scalable.svg'])
+  );
+  expect(script).not.toMatch(/^\s*(?:import|export)\s/m);
+  expect(script).not.toMatch(/\bimport\(|\brequire\(|__webpack_require__\.[a-z]\s*=/);
+});

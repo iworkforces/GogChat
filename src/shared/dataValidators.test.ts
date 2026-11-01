@@ -474,22 +474,57 @@ describe('validateOnlineCheckRequest', () => {
 });
 
 describe('validateOnlineStatusData', () => {
-  it('returns attemptId plus a boolean online flag', () => {
-    expect(validateOnlineStatusData({ attemptId: 'a1', online: true })).toEqual({
-      attemptId: 'a1',
-      online: true,
-    });
-    expect(validateOnlineStatusData({ attemptId: 'a1', online: false })).toEqual({
-      attemptId: 'a1',
-      online: false,
-    });
+  it.each(['online', 'network-error', 'timeout'] as const)(
+    'returns a fresh %s result carrying only attemptId and outcome',
+    (outcome) => {
+      const input = { attemptId: 'a1', outcome, message: 'ECONNRESET to https://x.test/?t=secret' };
+      const result = validateOnlineStatusData(input);
+      expect(result).toEqual({ attemptId: 'a1', outcome });
+      expect(result).not.toBe(input);
+    }
+  );
+
+  it.each([300, 404, 503, 599])('keeps the %i status on an http-error result', (httpStatus) => {
+    expect(
+      validateOnlineStatusData({ attemptId: 'a1', outcome: 'http-error', httpStatus, error: 'x' })
+    ).toEqual({ attemptId: 'a1', outcome: 'http-error', httpStatus });
   });
 
-  it('rejects coerced or missing online flags', () => {
-    expect(() => validateOnlineStatusData({ attemptId: 'a1', online: 'true' })).toThrow(
-      'online must be a boolean'
+  it.each([undefined, null, '503', 503.5, NaN, Infinity, 0, 100, 204, 299, 600, -1])(
+    'rejects http-error with status %s',
+    (httpStatus) => {
+      expect(() =>
+        validateOnlineStatusData({ attemptId: 'a1', outcome: 'http-error', httpStatus })
+      ).toThrow('httpStatus must be an integer HTTP error status');
+    }
+  );
+
+  it.each(['online', 'network-error', 'timeout'])('rejects a status on %s', (outcome) => {
+    expect(() => validateOnlineStatusData({ attemptId: 'a1', outcome, httpStatus: 503 })).toThrow(
+      'httpStatus is only valid for http-error'
     );
-    expect(() => validateOnlineStatusData({ attemptId: 'a1' })).toThrow('online must be a boolean');
-    expect(() => validateOnlineStatusData(null)).toThrow('must be a plain object');
+  });
+
+  it.each([undefined, null, true, 'offline', 'ONLINE', 'cancelled', 1, {}])(
+    'rejects unknown outcome %s',
+    (outcome) => {
+      expect(() => validateOnlineStatusData({ attemptId: 'a1', outcome })).toThrow(
+        'Unknown online status outcome'
+      );
+    }
+  );
+
+  it('rejects the legacy boolean shape', () => {
+    expect(() => validateOnlineStatusData({ attemptId: 'a1', online: true })).toThrow(
+      'Unknown online status outcome'
+    );
+  });
+
+  it.each([undefined, null, '', '   ', 7, 'a'.repeat(129)])('rejects attemptId %s', (attemptId) => {
+    expect(() => validateOnlineStatusData({ attemptId, outcome: 'online' })).toThrow();
+  });
+
+  it.each([null, undefined, 'online', 1, []])('rejects non-object payload %s', (payload) => {
+    expect(() => validateOnlineStatusData(payload)).toThrow('must be a plain object');
   });
 });

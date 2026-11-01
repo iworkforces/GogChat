@@ -23,8 +23,12 @@ vi.mock('../shared/dataValidators.js', () => ({
     }
     return data;
   }),
-  validateOnlineStatusData: vi.fn((data: { attemptId: string; online: boolean }) => {
-    if (!data || typeof data.attemptId !== 'string' || typeof data.online !== 'boolean') {
+  validateOnlineStatusData: vi.fn((data: { attemptId: string; outcome: string }) => {
+    if (
+      !data ||
+      typeof data.attemptId !== 'string' ||
+      !['online', 'http-error', 'network-error', 'timeout'].includes(data.outcome)
+    ) {
       throw new Error('bad status');
     }
     return data;
@@ -310,34 +314,39 @@ describe('preload/index.ts', () => {
       expect(ipcRenderer.on).toHaveBeenCalledWith('online-status', expect.any(Function));
     });
 
-    it('extracts attempt-aware status from event args and invokes callback', async () => {
+    it('extracts attempt-aware outcomes from event args and invokes callback', async () => {
       const api = await loadPreload();
       const cb = vi.fn();
       api.onOnlineStatus(cb);
       const onMock = vi.mocked(ipcRenderer.on);
       const [, listener] = onMock.mock.calls[0] ?? [];
       expect(listener).toBeDefined();
-      (listener as (event: unknown, data: { attemptId: string; online: boolean }) => void)(
-        {},
-        { attemptId: 'a1', online: true }
-      );
-      expect(cb).toHaveBeenCalledWith({ attemptId: 'a1', online: true });
+      const deliver = listener as (event: unknown, data: unknown) => void;
+      deliver({}, { attemptId: 'a1', outcome: 'online' });
+      expect(cb).toHaveBeenLastCalledWith({ attemptId: 'a1', outcome: 'online' });
 
-      (listener as (event: unknown, data: { attemptId: string; online: boolean }) => void)(
-        {},
-        { attemptId: 'a2', online: false }
-      );
-      expect(cb).toHaveBeenCalledWith({ attemptId: 'a2', online: false });
-      expect(cb).toHaveBeenCalledTimes(2);
+      deliver({}, { attemptId: 'a2', outcome: 'http-error', httpStatus: 503 });
+      expect(cb).toHaveBeenLastCalledWith({
+        attemptId: 'a2',
+        outcome: 'http-error',
+        httpStatus: 503,
+      });
+      deliver({}, { attemptId: 'a3', outcome: 'network-error' });
+      deliver({}, { attemptId: 'a4', outcome: 'timeout' });
+      expect(cb).toHaveBeenCalledTimes(4);
     });
 
-    it('does not invoke the callback for an invalid status payload', async () => {
+    it.each([
+      ['a missing outcome', { attemptId: 'a1' }],
+      ['the legacy boolean shape', { attemptId: 'a1', online: true }],
+      ['an unknown outcome', { attemptId: 'a1', outcome: 'offline' }],
+    ])('does not invoke the callback for %s', async (_name, payload) => {
       const api = await loadPreload();
       const cb = vi.fn();
       api.onOnlineStatus(cb);
       const onMock = vi.mocked(ipcRenderer.on);
       const [, listener] = onMock.mock.calls[0] ?? [];
-      (listener as (event: unknown, data: unknown) => void)({}, { online: true });
+      (listener as (event: unknown, data: unknown) => void)({}, payload);
       expect(cb).not.toHaveBeenCalled();
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         '[GogChat API] Invalid online status:',

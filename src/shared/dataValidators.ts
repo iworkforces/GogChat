@@ -228,19 +228,45 @@ export function validateOnlineCheckRequest(data: unknown): OnlineCheckRequest {
   return { attemptId: validateAttemptId(data['attemptId']) };
 }
 
+/** Non-2xx statuses a `response.ok === false` fetch can surface. */
+const HTTP_ERROR_STATUS_MIN = 300;
+const HTTP_ERROR_STATUS_MAX = 599;
+
+function validateHttpErrorStatus(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < HTTP_ERROR_STATUS_MIN ||
+    value > HTTP_ERROR_STATUS_MAX
+  ) {
+    throw new Error('httpStatus must be an integer HTTP error status');
+  }
+  return value;
+}
+
 /**
- * Validates an ONLINE_STATUS response payload.
- * @throws Error if the payload is not a plain object with attemptId + boolean online
+ * Validates an ONLINE_STATUS response payload into a fresh discriminated
+ * result. Unknown keys (including raw error text) are never copied.
+ * @throws Error on a non-object, bad attemptId, unknown outcome, or a status
+ *   that is missing from `http-error` or present on any other outcome
  */
 export function validateOnlineStatusData(data: unknown): OnlineStatusData {
   if (!isSafeObject(data)) {
     throw new Error('Online status must be a plain object');
   }
-  if (typeof data['online'] !== 'boolean') {
-    throw new Error('online must be a boolean');
+  const attemptId = validateAttemptId(data['attemptId']);
+  const outcome = data['outcome'];
+  switch (outcome) {
+    case 'http-error':
+      return { attemptId, outcome, httpStatus: validateHttpErrorStatus(data['httpStatus']) };
+    case 'online':
+    case 'network-error':
+    case 'timeout':
+      if (data['httpStatus'] !== undefined) {
+        throw new Error('httpStatus is only valid for http-error');
+      }
+      return { attemptId, outcome };
+    default:
+      throw new Error('Unknown online status outcome');
   }
-  return {
-    attemptId: validateAttemptId(data['attemptId']),
-    online: data['online'],
-  };
 }
