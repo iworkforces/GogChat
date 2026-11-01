@@ -4,11 +4,12 @@
  * the validated GitHub release pipeline.
  */
 
-import { app } from 'electron';
+import { app, powerMonitor } from 'electron';
 import log from 'electron-log';
 import { sanitizeLogError } from '../../shared/logSanitizer.js';
 import { configGet, configSet } from '../config.js';
 import {
+  addTrackedListener,
   cancelTrackedInterval,
   cancelTrackedTimeout,
   createTrackedInterval,
@@ -22,9 +23,10 @@ import {
   presentUpdateDialog,
 } from '../utils/platform/updateWindow.js';
 import { asType } from '../../shared/typeUtils.js';
+import type { EventTarget } from '../utils/lifecycle/cleanupTypes.js';
 import { validateExternalURL } from '../../shared/urlValidators.js';
 import { openExternal } from '../utils/security/shellWrapper.js';
-import { registerMenuAction } from './menuActionRegistry.js';
+import { getMenuAction, registerMenuAction } from './menuActionRegistry.js';
 
 let interval: ReturnType<typeof setInterval> | null = null;
 let initialCheck: ReturnType<typeof setTimeout> | null = null;
@@ -41,6 +43,107 @@ let manualWaiter: (() => void) | null = null;
 let manualWaitGeneration = 0;
 /** Latches on `before-quit` and the update cleanup task. */
 let backgroundShutdown = false;
+
+/** Length of one Preferences snooze: wall time at the click plus this. */
+export const UPDATE_SNOOZE_MS = 86_400_000;
+/** Largest delay `setTimeout` honors; longer waits are re-armed from the wall clock. */
+export const MAX_SNOOZE_TIMER_DELAY_MS = 2_147_483_647;
+/** The single tracked expiry timeout, present only while a snooze is pending. */
+let snoozeTimer: ReturnType<typeof setTimeout> | null = null;
+/** Deadline of the snooze whose expiry has not been consumed yet; 0 when none. */
+let pendingSnoozeDeadline = 0;
+/** Bumped by every persisted snooze so fetches started earlier cannot prompt. */
+let snoozeEpoch = 0;
+let snoozeResumeHandler: (() => void) | null = null;
+
+function readSnoozeDeadline(): number {
+  return configGet('app.updateSnoozedUntil') ?? 0;
+}
+
+function isUpdateSnoozed(): boolean {
+  return readSnoozeDeadline() > Date.now();
+}
+
+/**
+ * Re-read the persisted wall-clock deadline and align the one expiry timeout
+ * with it. An active deadline (re)arms the timer, capped at the `setTimeout`
+ * limit; one that passed since it was last seen is consumed here, and
+ * `offerCheck` lets that consumption request a single nonqueued check.
+ */
+function reconcileSnooze(offerCheck: boolean): void {
+  if (backgroundShutdown) {
+    return;
+  }
+  if (snoozeTimer) {
+    cancelTrackedTimeout(snoozeTimer);
+    snoozeTimer = null;
+  }
+  const deadline = readSnoozeDeadline();
+  const remaining = deadline - Date.now();
+  if (remaining > 0) {
+    pendingSnoozeDeadline = deadline;
+    snoozeTimer = createTrackedTimeout(
+      () => {
+        snoozeTimer = null;
+        reconcileSnooze(true);
+      },
+      Math.min(remaining, MAX_SNOOZE_TIMER_DELAY_MS),
+      'appUpdates-snooze-expiry'
+    );
+    return;
+  }
+  const consumed = pendingSnoozeDeadline !== 0;
+  pendingSnoozeDeadline = 0;
+  if (!consumed) {
+    return;
+  }
+  getMenuAction('refreshApplicationMenu')?.handler();
+  if (offerCheck) {
+    void runBackgroundUpdateCheck();
+  }
+}
+
+/**
+ * Persist `deadline`, then invalidate in-flight fetches and restart the expiry
+ * timer. A failed write leaves the previous policy, timer, and epoch untouched.
+ */
+function persistSnooze(deadline: number): boolean {
+  try {
+    configSet('app.updateSnoozedUntil', deadline);
+  } catch (err: unknown) {
+    log.error('[Updates] Failed to persist update snooze:', sanitizeLogError(err));
+    return false;
+  }
+  snoozeEpoch += 1;
+  reconcileSnooze(true);
+  return true;
+}
+
+/** Snooze automatic update prompts for 24 hours from now. */
+export function snoozeUpdatePrompts(): boolean {
+  return persistSnooze(Date.now() + UPDATE_SNOOZE_MS);
+}
+
+/** End the snooze early; an active snooze requests one nonqueued background check. */
+export function resumeUpdatePrompts(): boolean {
+  return persistSnooze(0);
+}
+
+function listenForSystemResume(): void {
+  if (snoozeResumeHandler) {
+    powerMonitor.removeListener('resume', snoozeResumeHandler);
+  }
+  const handler = (): void => {
+    reconcileSnooze(true);
+  };
+  snoozeResumeHandler = handler;
+  addTrackedListener(
+    asType<EventTarget>(powerMonitor),
+    'resume',
+    handler,
+    'appUpdates-snooze-resume'
+  );
+}
 
 /** Test-only: release the shared session gate after a hung or aborted case. */
 export function resetManualUpdateGateForTests(): void {
@@ -455,12 +558,16 @@ export async function runBackgroundUpdateCheck(): Promise<void> {
     if (shutdownBlocksUpdateUi()) {
       return;
     }
+    if (isUpdateSnoozed()) {
+      return;
+    }
     if (updateSessionGate) {
       return;
     }
     updateSessionGate = true;
     sessionOwner = 'background';
     acquired = true;
+    const fetchEpoch = snoozeEpoch;
 
     const pkg = getPackageInfo();
     const repo = githubRepoSlug(pkg.repository);
@@ -477,7 +584,12 @@ export async function runBackgroundUpdateCheck(): Promise<void> {
       return;
     }
 
-    if (!configGet('app.autoCheckForUpdates') || shutdownBlocksUpdateUi()) {
+    if (
+      !configGet('app.autoCheckForUpdates') ||
+      shutdownBlocksUpdateUi() ||
+      fetchEpoch !== snoozeEpoch ||
+      isUpdateSnoozed()
+    ) {
       return;
     }
     if (!latest) {
@@ -520,8 +632,13 @@ export default () => {
   if (interval) cancelTrackedInterval(interval);
 
   const runScheduledBackgroundCheck = (): void => {
+    reconcileSnooze(false);
     void runBackgroundUpdateCheck();
   };
+
+  pendingSnoozeDeadline = 0;
+  reconcileSnooze(false);
+  listenForSystemResume();
 
   initialCheck = createTrackedTimeout(
     runScheduledBackgroundCheck,
@@ -555,11 +672,25 @@ registerMenuAction('checkForUpdates', {
   },
 });
 
+registerMenuAction('snoozeUpdatePrompts', {
+  label: 'Snooze Update Prompts',
+  handler: snoozeUpdatePrompts,
+});
+
+registerMenuAction('resumeUpdatePrompts', {
+  label: 'Resume Update Prompts',
+  handler: resumeUpdatePrompts,
+});
+
+type UpdateSnoozeState = { deadline: number; active: boolean; timerArmed: boolean };
+
 type UpdateTestGlobal = typeof globalThis & {
   __gogchatCheckForUpdatesManual?: typeof checkForUpdatesManual;
   __gogchatRunBackgroundUpdateCheck?: typeof runBackgroundUpdateCheck;
   __gogchatSetAutoCheckForUpdates?: (enabled: boolean) => void;
   __gogchatBackgroundCheckScheduledAt?: number;
+  __gogchatSetUpdateSnoozedUntil?: (deadline: number) => boolean;
+  __gogchatGetUpdateSnoozeState?: () => UpdateSnoozeState;
 };
 
 function noteBackgroundCheckScheduled(): void {
@@ -580,6 +711,11 @@ export function installUpdateTestHooks(): void {
   testGlobal.__gogchatRunBackgroundUpdateCheck = runBackgroundUpdateCheck;
   testGlobal.__gogchatSetAutoCheckForUpdates = (enabled: boolean): void => {
     configSet('app.autoCheckForUpdates', enabled);
+  };
+  testGlobal.__gogchatSetUpdateSnoozedUntil = persistSnooze;
+  testGlobal.__gogchatGetUpdateSnoozeState = (): UpdateSnoozeState => {
+    const deadline = readSnoozeDeadline();
+    return { deadline, active: deadline > Date.now(), timerArmed: snoozeTimer !== null };
   };
 }
 

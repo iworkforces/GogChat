@@ -18,6 +18,11 @@ import { asType } from '../../shared/typeUtils.js';
 export interface MenuActionMap {
   aboutPanel: (window: Electron.BrowserWindow) => void;
   checkForUpdates: () => void;
+  /** Persist a 24-hour snooze; false when the write failed and nothing changed. */
+  snoozeUpdatePrompts: () => boolean;
+  /** Persist the end of a snooze; false when the write failed and nothing changed. */
+  resumeUpdatePrompts: () => boolean;
+  refreshApplicationMenu: () => void;
   autoLaunch: () => { enable: () => Promise<void>; disable: () => Promise<void> };
   toggleExternalLinksGuard: (window: Electron.BrowserWindow) => void;
   processDeepLink: (url: string) => void;

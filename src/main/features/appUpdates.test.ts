@@ -10,11 +10,16 @@ const {
   mockCancelTrackedInterval,
   mockCancelTrackedTimeout,
   mockRegisterCleanupTask,
+  mockAddTrackedListener,
+  powerListeners,
+  registeredActions,
+  mockRefreshMenu,
   beforeQuitHandler,
   cleanupLatch,
 } = vi.hoisted(() => {
   const quit = { current: undefined as (() => void) | undefined };
   const latch = { current: undefined as (() => void) | undefined };
+  const resumeListeners = new Set<() => void>();
   let nextTimerId = 10;
   return {
     mockCreateTrackedTimeout: vi.fn(() => {
@@ -30,6 +35,12 @@ const {
     mockRegisterCleanupTask: vi.fn((name: string, callback: () => void) => {
       if (name === 'appUpdates-suppress-prompts') latch.current = callback;
     }),
+    mockAddTrackedListener: vi.fn((_target: unknown, event: string, handler: () => void) => {
+      if (event === 'resume') resumeListeners.add(handler);
+    }),
+    powerListeners: resumeListeners,
+    registeredActions: {} as Record<string, { label: string; handler: () => unknown }>,
+    mockRefreshMenu: vi.fn(),
     beforeQuitHandler: quit,
     cleanupLatch: latch,
   };
@@ -43,6 +54,11 @@ vi.mock('electron', () => ({
       if (event === 'before-quit') beforeQuitHandler.current = handler;
     }),
   },
+  powerMonitor: {
+    removeListener: vi.fn((event: string, handler: () => void) => {
+      if (event === 'resume') powerListeners.delete(handler);
+    }),
+  },
 }));
 
 vi.mock('electron-log', () => ({
@@ -50,6 +66,7 @@ vi.mock('electron-log', () => ({
 }));
 
 vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
+  addTrackedListener: mockAddTrackedListener,
   cancelTrackedInterval: mockCancelTrackedInterval,
   cancelTrackedTimeout: mockCancelTrackedTimeout,
   createTrackedTimeout: mockCreateTrackedTimeout,
@@ -84,7 +101,12 @@ vi.mock('../../shared/urlValidators.js', () => ({
 }));
 
 vi.mock('./menuActionRegistry.js', () => ({
-  registerMenuAction: vi.fn(),
+  registerMenuAction: vi.fn((id: string, action: { label: string; handler: () => unknown }) => {
+    registeredActions[id] = action;
+  }),
+  getMenuAction: vi.fn((id: string) =>
+    id === 'refreshApplicationMenu' ? { label: 'Refresh', handler: mockRefreshMenu } : undefined
+  ),
 }));
 
 import appUpdates, {
@@ -94,10 +116,12 @@ import appUpdates, {
   isVersionNewer,
   resetBackgroundShutdownForTests,
   resetManualUpdateGateForTests,
+  resumeUpdatePrompts,
   runBackgroundUpdateCheck,
+  snoozeUpdatePrompts,
 } from './appUpdates';
 import * as appUpdatesModule from './appUpdates';
-import { app } from 'electron';
+import { app, powerMonitor } from 'electron';
 import log from 'electron-log';
 import { configGet, configSet } from '../config.js';
 import {
@@ -1497,5 +1521,615 @@ describe('checkForUpdatesManual', () => {
         detail: expect.not.stringMatching(/\n\n/),
       })
     );
+  });
+});
+
+describe('update prompt snooze', () => {
+  const NOW = Date.parse('2026-03-01T12:00:00Z');
+  const DAY = 86_400_000;
+  const MAX_DELAY = 2_147_483_647;
+  const SNOOZE_TIMER = 'appUpdates-snooze-expiry';
+  const config: Record<string, unknown> = {};
+  let failWrites = false;
+
+  type FetchBody = { ok: boolean; json: () => Promise<unknown> };
+
+  async function flush(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      await Promise.resolve();
+    }
+  }
+
+  function snoozeTimers(): Array<{ fire: () => void; delay: number; id: unknown }> {
+    const calls = mockCreateTrackedTimeout.mock.calls as unknown as unknown[][];
+    return calls.flatMap((call, index) =>
+      call[2] === SNOOZE_TIMER
+        ? [
+            {
+              fire: call[0] as () => void,
+              delay: call[1] as number,
+              id: mockCreateTrackedTimeout.mock.results[index]?.value,
+            },
+          ]
+        : []
+    );
+  }
+
+  function lastSnoozeTimer(): { fire: () => void; delay: number; id: unknown } {
+    const timer = snoozeTimers().at(-1);
+    if (!timer) throw new Error('no snooze expiry timer was created');
+    return timer;
+  }
+
+  function heldFetch(): { fetchMock: ReturnType<typeof vi.fn>; release: (index?: number) => void } {
+    const pending: Array<(value: FetchBody) => void> = [];
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<FetchBody>((resolve) => {
+          pending.push(resolve);
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return {
+      fetchMock,
+      release: (index = 0) => pending[index]?.({ ok: true, json: async () => [STABLE_V9] }),
+    };
+  }
+
+  function immediateFetch(): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [STABLE_V9] });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  function initialCheckTick(): () => void {
+    const calls = mockCreateTrackedTimeout.mock.calls as unknown as unknown[][];
+    const call = calls.find((entry) => entry[2] === 'appUpdates-initial-check');
+    if (!call) throw new Error('initial check was not scheduled');
+    return call[0] as () => void;
+  }
+
+  function dailyTick(): () => void {
+    return timerCallback(mockCreateTrackedInterval.mock.calls);
+  }
+
+  function startWith(deadline: number): void {
+    config['app.updateSnoozedUntil'] = deadline;
+    appUpdates();
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    config['app.autoCheckForUpdates'] = true;
+    config['app.updateSnoozedUntil'] = 0;
+    failWrites = false;
+    vi.mocked(configGet).mockImplementation(((key: string) => config[key]) as never);
+    vi.mocked(configSet).mockImplementation(((key: string, value: unknown) => {
+      if (failWrites) throw new Error('https://user:pass@evil.example/disk-full');
+      config[key] = value;
+    }) as never);
+    resetManualUpdateGateForTests();
+    resetBackgroundShutdownForTests();
+    vi.mocked(isUpdateSessionDismissed).mockReturnValue(false);
+    vi.mocked(presentUpdateDialog).mockResolvedValue({ response: 1 });
+    vi.mocked(openExternal).mockResolvedValue(undefined);
+    vi.mocked(getPackageInfo).mockReturnValue({
+      repository: 'https://github.com/iworkforces/GogChat',
+      productName: 'GogChat',
+    } as never);
+    appUpdates();
+    vi.clearAllMocks();
+    immediateFetch();
+  });
+
+  afterEach(() => {
+    resetManualUpdateGateForTests();
+    resetBackgroundShutdownForTests();
+    startWith(0);
+    vi.mocked(configGet).mockReset();
+    vi.mocked(configGet).mockReturnValue(true);
+    vi.mocked(configSet).mockReset();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  describe('Preferences actions', () => {
+    it('registers dedicated typed actions that are not the manual-check action', () => {
+      expect(registeredActions['snoozeUpdatePrompts']?.handler).toBe(snoozeUpdatePrompts);
+      expect(registeredActions['resumeUpdatePrompts']?.handler).toBe(resumeUpdatePrompts);
+      expect(registeredActions['checkForUpdates']?.handler).not.toBe(snoozeUpdatePrompts);
+    });
+
+    it('stores wall time plus 86,400,000 ms and arms one expiry timer without touching auto-check', () => {
+      expect(snoozeUpdatePrompts()).toBe(true);
+
+      expect(configSet).toHaveBeenCalledTimes(1);
+      expect(configSet).toHaveBeenCalledWith('app.updateSnoozedUntil', NOW + DAY);
+      expect(config['app.autoCheckForUpdates']).toBe(true);
+      expect(snoozeTimers()).toHaveLength(1);
+      expect(lastSnoozeTimer().delay).toBe(DAY);
+    });
+
+    it('replaces the expiry timer when snoozed again', () => {
+      snoozeUpdatePrompts();
+      const first = lastSnoozeTimer();
+      vi.setSystemTime(NOW + 1000);
+
+      snoozeUpdatePrompts();
+
+      expect(mockCancelTrackedTimeout).toHaveBeenCalledWith(first.id);
+      expect(snoozeTimers()).toHaveLength(2);
+      expect(config['app.updateSnoozedUntil']).toBe(NOW + 1000 + DAY);
+    });
+
+    it('stores zero on resume, cancels the timer, and leaves auto-check alone', () => {
+      snoozeUpdatePrompts();
+      const timer = lastSnoozeTimer();
+
+      expect(resumeUpdatePrompts()).toBe(true);
+
+      expect(configSet).toHaveBeenLastCalledWith('app.updateSnoozedUntil', 0);
+      expect(mockCancelTrackedTimeout).toHaveBeenCalledWith(timer.id);
+      expect(snoozeTimers()).toHaveLength(1);
+      expect(config['app.autoCheckForUpdates']).toBe(true);
+      expect(mockRefreshMenu).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves policy, timer, and auto-check intact when persisting a snooze fails', async () => {
+      failWrites = true;
+
+      expect(snoozeUpdatePrompts()).toBe(false);
+
+      expect(config['app.updateSnoozedUntil']).toBe(0);
+      expect(snoozeTimers()).toHaveLength(0);
+      expect(config['app.autoCheckForUpdates']).toBe(true);
+      expect(loggedText()).toContain('[redacted]');
+      expect(loggedText()).not.toContain('evil.example');
+      await runBackgroundUpdateCheck();
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps an active snooze and its timer when persisting a resume fails', async () => {
+      snoozeUpdatePrompts();
+      const timer = lastSnoozeTimer();
+      mockCancelTrackedTimeout.mockClear();
+      failWrites = true;
+
+      expect(resumeUpdatePrompts()).toBe(false);
+
+      expect(config['app.updateSnoozedUntil']).toBe(NOW + DAY);
+      expect(mockCancelTrackedTimeout).not.toHaveBeenCalled();
+      expect(snoozeTimers()).toEqual([expect.objectContaining({ id: timer.id })]);
+      await runBackgroundUpdateCheck();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(mockRefreshMenu).not.toHaveBeenCalled();
+    });
+
+    it('does not invalidate an in-flight fetch when the snooze write fails', async () => {
+      const { release } = heldFetch();
+      const pending = runBackgroundUpdateCheck();
+      failWrites = true;
+      snoozeUpdatePrompts();
+
+      release();
+      await pending;
+
+      expect(presentUpdateDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'New release available' })
+      );
+    });
+  });
+
+  describe('background eligibility', () => {
+    it('suppresses background fetches while snoozed without queueing catch-up work', async () => {
+      config['app.updateSnoozedUntil'] = NOW + 1;
+
+      await runBackgroundUpdateCheck();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expectNoUpdateUi();
+      vi.setSystemTime(NOW + 1);
+      await flush();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['inactive', 0],
+      ['expired', NOW - 1],
+      ['exactly now', NOW],
+    ])('runs the check when the deadline is %s', async (_label, deadline) => {
+      config['app.updateSnoozedUntil'] = deadline;
+
+      await runBackgroundUpdateCheck();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(presentUpdateDialog).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses the prompt of a fetch that was in flight when the snooze began', async () => {
+      const { fetchMock, release } = heldFetch();
+      const pending = runBackgroundUpdateCheck();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      snoozeUpdatePrompts();
+      release();
+      await pending;
+
+      expectNoUpdateUi();
+    });
+
+    it('suppresses that prompt even when the user resumes before the fetch finishes', async () => {
+      const { fetchMock, release } = heldFetch();
+      const pending = runBackgroundUpdateCheck();
+
+      snoozeUpdatePrompts();
+      resumeUpdatePrompts();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      release();
+      await pending;
+
+      expectNoUpdateUi();
+      const next = immediateFetch();
+      await runBackgroundUpdateCheck();
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(presentUpdateDialog).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the session gate so a later check can prompt after a suppressed fetch', async () => {
+      const { release } = heldFetch();
+      const pending = runBackgroundUpdateCheck();
+      snoozeUpdatePrompts();
+      release();
+      await pending;
+
+      immediateFetch();
+      resumeUpdatePrompts();
+      await flush();
+
+      expect(vi.mocked(presentUpdateDialog)).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'New release available' })
+      );
+    });
+
+    it('leaves an already-visible prompt open and functional after a snooze', async () => {
+      let answer!: (value: { response: number }) => void;
+      vi.mocked(presentUpdateDialog).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answer = resolve;
+          })
+      );
+      const pending = runBackgroundUpdateCheck();
+      await vi.waitFor(() => expect(presentUpdateDialog).toHaveBeenCalledTimes(1));
+
+      snoozeUpdatePrompts();
+      answer({ response: 0 });
+      await pending;
+
+      expect(openExternal).toHaveBeenCalledWith(STABLE_V9.html_url);
+    });
+
+    it('keeps blocking on disabled auto-check and shutdown while the snooze is inactive', async () => {
+      config['app.autoCheckForUpdates'] = false;
+      await runBackgroundUpdateCheck();
+      config['app.autoCheckForUpdates'] = true;
+      fireBeforeQuit();
+      await runBackgroundUpdateCheck();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('expiry timer', () => {
+    it('restores a future deadline on initialization with one capped-safe timer', () => {
+      startWith(NOW + 5000);
+
+      expect(snoozeTimers()).toHaveLength(1);
+      expect(lastSnoozeTimer().delay).toBe(5000);
+      expect(mockCreateTrackedTimeout).toHaveBeenCalledWith(
+        expect.any(Function),
+        5000,
+        'appUpdates-initial-check'
+      );
+    });
+
+    it.each([
+      ['inactive', 0],
+      ['already expired', NOW - 1],
+    ])('arms no expiry timer for an %s restored deadline', (_label, deadline) => {
+      startWith(deadline);
+
+      expect(snoozeTimers()).toHaveLength(0);
+    });
+
+    it('uses the normal startup check for an already-expired restored deadline', async () => {
+      startWith(NOW - 1);
+      await flush();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+
+      initialCheckTick()();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(mockRefreshMenu).not.toHaveBeenCalled();
+    });
+
+    it('skips the startup check while snoozed and offers one check at expiry', async () => {
+      startWith(NOW + 60_000);
+      initialCheckTick()();
+      await flush();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+
+      vi.setSystemTime(NOW + 60_000);
+      lastSnoozeTimer().fire();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(presentUpdateDialog).toHaveBeenCalledTimes(1);
+      expect(mockRefreshMenu).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers at most one check per consumed expiry', async () => {
+      startWith(NOW + 1000);
+      const timer = lastSnoozeTimer();
+      vi.setSystemTime(NOW + 1000);
+
+      timer.fire();
+      await flush();
+      timer.fire();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(snoozeTimers()).toHaveLength(1);
+    });
+
+    it('caps the delay and re-arms from the wall clock until the deadline', async () => {
+      const deadline = NOW + 40 * DAY;
+      startWith(deadline);
+      expect(lastSnoozeTimer().delay).toBe(MAX_DELAY);
+
+      vi.setSystemTime(NOW + MAX_DELAY);
+      lastSnoozeTimer().fire();
+      await flush();
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(snoozeTimers()).toHaveLength(2);
+      expect(lastSnoozeTimer().delay).toBe(deadline - (NOW + MAX_DELAY));
+
+      vi.setSystemTime(deadline);
+      lastSnoozeTimer().fire();
+      await flush();
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-arms with the remaining wall time when the clock moved backward', async () => {
+      startWith(NOW + 10_000);
+      vi.setSystemTime(NOW - 50_000);
+
+      lastSnoozeTimer().fire();
+      await flush();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(lastSnoozeTimer().delay).toBe(60_000);
+      expect(snoozeTimers()).toHaveLength(2);
+    });
+
+    it('does not queue the expiry check behind a held session gate', async () => {
+      const { release } = heldFetch();
+      const manual = checkForUpdatesManual();
+      await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+      startWith(NOW + 1000);
+      vi.setSystemTime(NOW + 1000);
+
+      lastSnoozeTimer().fire();
+      release();
+      await manual;
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers one check on early resume and queues nothing behind a held gate', async () => {
+      snoozeUpdatePrompts();
+      const { release } = heldFetch();
+      const manual = checkForUpdatesManual();
+      await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+
+      resumeUpdatePrompts();
+      release();
+      await manual;
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers one check on early resume when the gate is free', async () => {
+      snoozeUpdatePrompts();
+
+      resumeUpdatePrompts();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(presentUpdateDialog).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not request a check when resuming without an active snooze', async () => {
+      resumeUpdatePrompts();
+      await flush();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(mockRefreshMenu).not.toHaveBeenCalled();
+    });
+
+    it('replaces the timer and the resume listener on repeated initialization', () => {
+      startWith(NOW + 10_000);
+      const first = lastSnoozeTimer();
+      const firstListener = [...powerListeners][0];
+      expect(powerListeners.size).toBe(1);
+
+      appUpdates();
+
+      expect(mockCancelTrackedTimeout).toHaveBeenCalledWith(first.id);
+      expect(snoozeTimers()).toHaveLength(2);
+      expect(powerMonitor.removeListener).toHaveBeenCalledWith('resume', firstListener);
+      expect(powerListeners.size).toBe(1);
+      expect([...powerListeners][0]).not.toBe(firstListener);
+      expect(mockAddTrackedListener).toHaveBeenLastCalledWith(
+        powerMonitor,
+        'resume',
+        expect.any(Function),
+        'appUpdates-snooze-resume'
+      );
+    });
+  });
+
+  describe('reconciliation points', () => {
+    it('consumes an expiry that passed during sleep when the system resumes', async () => {
+      startWith(NOW + 3_600_000);
+      vi.setSystemTime(NOW + 4_000_000);
+
+      for (const listener of powerListeners) listener();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(mockRefreshMenu).toHaveBeenCalledTimes(1);
+      for (const listener of powerListeners) listener();
+      await flush();
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-arms on system resume while the deadline is still in the future', async () => {
+      startWith(NOW + 3_600_000);
+      vi.setSystemTime(NOW + 600_000);
+
+      for (const listener of powerListeners) listener();
+      await flush();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(lastSnoozeTimer().delay).toBe(3_000_000);
+    });
+
+    it('lets the scheduled check be the only check when the poll finds an expiry', async () => {
+      startWith(NOW + 1000);
+      vi.setSystemTime(NOW + 5000);
+
+      dailyTick()();
+      await flush();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(mockRefreshMenu).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the poll suppressed and the timer armed while still snoozed', async () => {
+      startWith(NOW + DAY);
+
+      dailyTick()();
+      await flush();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(lastSnoozeTimer().delay).toBe(DAY);
+    });
+  });
+
+  describe('shutdown and manual checks', () => {
+    it('offers nothing at expiry or resume once shutdown has latched', async () => {
+      startWith(NOW + 1000);
+      const timer = lastSnoozeTimer();
+      fireBeforeQuit();
+      vi.setSystemTime(NOW + 1000);
+
+      timer.fire();
+      resumeUpdatePrompts();
+      for (const listener of powerListeners) listener();
+      await flush();
+
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(snoozeTimers()).toHaveLength(1);
+      expectNoUpdateUi();
+    });
+
+    it('creates no expiry timer for a snooze persisted after the cleanup latch', () => {
+      latchCleanupTask();
+
+      expect(snoozeUpdatePrompts()).toBe(true);
+
+      expect(snoozeTimers()).toHaveLength(0);
+    });
+
+    it('keeps Check For Updates available during a snooze and leaves the snooze alone', async () => {
+      config['app.updateSnoozedUntil'] = NOW + DAY;
+
+      await checkForUpdatesManual();
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      expect(presentUpdateDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ phase: 'checking' })
+      );
+      expect(presentUpdateDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'New release available' })
+      );
+      expect(configSet).not.toHaveBeenCalled();
+    });
+
+    it('still lets a manual request wait for a background session started before a snooze', async () => {
+      const { release } = heldFetch();
+      const background = runBackgroundUpdateCheck();
+      snoozeUpdatePrompts();
+      const manual = checkForUpdatesManual();
+      await flush();
+      expect(presentUpdateDialog).not.toHaveBeenCalled();
+
+      vi.stubGlobal('fetch', immediateFetch());
+      release();
+      await background;
+      await manual;
+
+      expect(presentUpdateDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ phase: 'checking' })
+      );
+    });
+  });
+
+  describe('Playwright hooks', () => {
+    it('persists an arbitrary deadline through the real snooze path and reports state', async () => {
+      const previous = process.env['TESTING'];
+      const globals = globalThis as typeof globalThis & {
+        __gogchatSetUpdateSnoozedUntil?: (deadline: number) => boolean;
+        __gogchatGetUpdateSnoozeState?: () => {
+          deadline: number;
+          active: boolean;
+          timerArmed: boolean;
+        };
+      };
+      try {
+        process.env['TESTING'] = 'true';
+        installUpdateTestHooks();
+        expect(globals.__gogchatGetUpdateSnoozeState?.()).toEqual({
+          deadline: 0,
+          active: false,
+          timerArmed: false,
+        });
+
+        expect(globals.__gogchatSetUpdateSnoozedUntil?.(NOW + 1500)).toBe(true);
+
+        expect(globals.__gogchatGetUpdateSnoozeState?.()).toEqual({
+          deadline: NOW + 1500,
+          active: true,
+          timerArmed: true,
+        });
+        expect(lastSnoozeTimer().delay).toBe(1500);
+        await runBackgroundUpdateCheck();
+        expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      } finally {
+        delete globals.__gogchatSetUpdateSnoozedUntil;
+        delete globals.__gogchatGetUpdateSnoozeState;
+        if (previous === undefined) {
+          delete process.env['TESTING'];
+        } else {
+          process.env['TESTING'] = previous;
+        }
+      }
+    });
   });
 });
