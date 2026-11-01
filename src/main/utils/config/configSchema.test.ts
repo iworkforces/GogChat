@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
+import Conf from 'conf';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import type { StoreType } from '../../../shared/types/config.js';
 import { CACHE_VERSION, schema } from './configSchema.js';
 
 describe('CACHE_VERSION', () => {
@@ -100,9 +106,14 @@ describe('app section', () => {
     useWebContentsView: false,
   };
 
-  it('includes boolean app flags and accountLabels object', () => {
+  it('includes boolean app flags, accountLabels, snooze deadline, and maintenance mode', () => {
     expect(Object.keys(app.properties).sort()).toEqual(
-      [...Object.keys(expectedBooleanDefaults), 'accountLabels'].sort()
+      [
+        ...Object.keys(expectedBooleanDefaults),
+        'accountLabels',
+        'updateSnoozedUntil',
+        'sessionMaintenanceMode',
+      ].sort()
     );
     expect(app.properties['accountLabels']?.type).toBe('object');
     expect(app.default['accountLabels']).toEqual({});
@@ -115,6 +126,78 @@ describe('app section', () => {
   it.each(Object.entries(expectedBooleanDefaults))('property "%s" default is %s', (key, value) => {
     expect(app.properties[key]?.default).toBe(value);
     expect(app.default[key]).toBe(value);
+  });
+});
+
+describe('app update snooze and session maintenance settings', () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(path.join(tmpdir(), 'gogchat-config-schema-'));
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  function openStore(): Conf<StoreType> {
+    return new Conf<StoreType>({ cwd, schema });
+  }
+
+  it('defaults to inactive snooze and default maintenance in property and app defaults', () => {
+    const app = schema.app as {
+      properties: Record<string, { default: unknown }>;
+      default: Record<string, unknown>;
+    };
+    expect(app.properties['updateSnoozedUntil']?.default).toBe(0);
+    expect(app.default['updateSnoozedUntil']).toBe(0);
+    expect(app.properties['sessionMaintenanceMode']?.default).toBe('default');
+    expect(app.default['sessionMaintenanceMode']).toBe('default');
+  });
+
+  it('gives a fresh store inactive snooze and default maintenance', () => {
+    const store = openStore();
+    expect(store.get('app.updateSnoozedUntil')).toBe(0);
+    expect(store.get('app.sessionMaintenanceMode')).toBe('default');
+  });
+
+  it('fills both defaults for an older app object without resetting other preferences', () => {
+    writeFileSync(
+      path.join(cwd, 'config.json'),
+      JSON.stringify({ app: { autoCheckForUpdates: false, startHidden: true } })
+    );
+    const store = openStore();
+    expect(store.get('app.autoCheckForUpdates')).toBe(false);
+    expect(store.get('app.startHidden')).toBe(true);
+    expect(store.get('app.updateSnoozedUntil')).toBe(0);
+    expect(store.get('app.sessionMaintenanceMode')).toBe('default');
+  });
+
+  it.each([0, 1, 1_900_000_000_000, Number.MAX_SAFE_INTEGER])('accepts snooze deadline %s', (v) => {
+    const store = openStore();
+    store.set('app.updateSnoozedUntil', v);
+    expect(store.get('app.updateSnoozedUntil')).toBe(v);
+  });
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 2, Number.NaN, '5', true, null])(
+    'rejects snooze deadline %s',
+    (v) => {
+      const store = openStore();
+      expect(() => store.set('app.updateSnoozedUntil', v as never)).toThrow();
+      expect(store.get('app.updateSnoozedUntil')).toBe(0);
+    }
+  );
+
+  it.each(['default', 'conservative'] as const)('accepts maintenance mode %s', (v) => {
+    const store = openStore();
+    store.set('app.sessionMaintenanceMode', v);
+    expect(store.get('app.sessionMaintenanceMode')).toBe(v);
+  });
+
+  it.each(['Conservative', 'aggressive', '', 1, null])('rejects maintenance mode %s', (v) => {
+    const store = openStore();
+    expect(() => store.set('app.sessionMaintenanceMode', v as never)).toThrow();
+    expect(store.get('app.sessionMaintenanceMode')).toBe('default');
   });
 });
 
