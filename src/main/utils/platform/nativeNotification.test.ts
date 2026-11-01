@@ -2,13 +2,17 @@
  * Unit tests for shared native OS notification helper and unread-delta policy.
  */
 
-import { getEventListeners } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+type FakeListener = () => void;
 
 class FakeNotification {
   static all: FakeNotification[] = [];
+  static history: FakeNotification[] = [];
   static isSupported = vi.fn().mockReturnValue(true);
   static lastOptions: Record<string, unknown> | null = null;
+  static showFailure: Error | null = null;
 
   title: string;
   body?: string;
@@ -17,8 +21,13 @@ class FakeNotification {
   groupId?: string;
   silent: boolean;
   closed = false;
-  clickHandler: (() => void) | null = null;
-  closeHandler: (() => void) | null = null;
+  closeCalls = 0;
+  showCalls = 0;
+  closeMode: 'emit' | 'silent' | 'throw' = 'emit';
+  private readonly handlers: Record<'click' | 'close', Set<FakeListener>> = {
+    click: new Set(),
+    close: new Set(),
+  };
 
   constructor(options: {
     title: string;
@@ -36,28 +45,55 @@ class FakeNotification {
     this.groupId = options.groupId;
     this.silent = options.silent ?? false;
     FakeNotification.all.push(this);
+    FakeNotification.history.push(this);
   }
 
-  on(event: 'click' | 'close', handler: () => void) {
-    if (event === 'click') this.clickHandler = handler;
-    else this.closeHandler = handler;
+  on(event: 'click' | 'close', handler: FakeListener) {
+    this.handlers[event].add(handler);
+    return this;
   }
 
-  show() {}
+  removeListener(event: 'click' | 'close', handler: FakeListener) {
+    this.handlers[event].delete(handler);
+    return this;
+  }
+
+  listenerCount(event: 'click' | 'close') {
+    return this.handlers[event].size;
+  }
+
+  /** Handlers as the OS would hold them: a late callback may still reach a stale snapshot. */
+  snapshot(event: 'click' | 'close') {
+    return [...this.handlers[event]];
+  }
+
+  show() {
+    if (FakeNotification.showFailure) throw FakeNotification.showFailure;
+    this.showCalls += 1;
+  }
 
   close() {
+    this.closeCalls += 1;
+    if (this.closeMode === 'throw') throw new Error('close fail');
     this.closed = true;
-    this.closeHandler?.();
     FakeNotification.all = FakeNotification.all.filter((n) => n !== this);
+    if (this.closeMode === 'emit') this.emitClose();
+  }
+
+  /** Simulated OS callback; says nothing about real macOS delivery. */
+  emitClose() {
+    for (const handler of this.snapshot('close')) handler();
   }
 
   simulateClick() {
-    this.clickHandler?.();
+    for (const handler of this.snapshot('click')) handler();
   }
 
   static resetAll() {
     FakeNotification.all = [];
+    FakeNotification.history = [];
     FakeNotification.lastOptions = null;
+    FakeNotification.showFailure = null;
     FakeNotification.isSupported.mockReturnValue(true);
   }
 }
@@ -73,6 +109,7 @@ vi.mock('electron-log', () => ({
 }));
 
 vi.mock('../../../shared/constants.js', () => ({
+  IPC_CHANNELS: { NOTIFICATION_EVENT: 'notificationEvent' },
   TIMING: { NOTIFICATION_AUTO_DISMISS: 10000, NOTIFICATION_BRIDGE_COOLDOWN_MS: 8000 },
   BADGE: { DISPLAY_MAX: 99, MAX_COUNT: 9999, CACHE_LIMIT: 99 },
 }));
@@ -115,6 +152,62 @@ function makeWindow() {
     show: vi.fn(),
     focus: vi.fn(),
   };
+}
+
+function makeSender(id: number) {
+  const emitter = new EventEmitter();
+  let destroyed = false;
+  return Object.assign(emitter, {
+    id,
+    send: vi.fn(),
+    isDestroyed: () => destroyed,
+    destroy() {
+      destroyed = true;
+      emitter.emit('destroyed');
+    },
+  });
+}
+
+type FakeSender = ReturnType<typeof makeSender>;
+
+const MAIN_FRAME_NAVIGATION = { isMainFrame: true, isSameDocument: false };
+
+function lifecycleEvent(type: 'click' | 'close', instanceId: string, documentId = 'doc-1') {
+  return ['notificationEvent', { documentId, instanceId, type }];
+}
+
+/** Native object created for `instanceId` (the fake titles each notification with its id). */
+function nativeFor(instanceId: string) {
+  const found = FakeNotification.history.find((n) => n.title === instanceId);
+  if (!found) throw new Error(`no native notification for ${instanceId}`);
+  return found;
+}
+
+/** Handlers as the OS may still hold them after the helper detached them. */
+function captureStaleCallbacks(native: FakeNotification) {
+  const callbacks = [...native.snapshot('click'), ...native.snapshot('close')];
+  return () => {
+    for (const callback of callbacks) callback();
+  };
+}
+
+async function loadPageHelpers() {
+  const mod = await import('./nativeNotification.js');
+  const win = makeWindow();
+  const show = (sender: FakeSender, instanceId: string, tag: string, documentId = 'doc-1') =>
+    mod.showNativeNotification(
+      { title: instanceId, tag },
+      {
+        focusWindow: win as never,
+        ipcEvent: { sender } as never,
+        source: 'bridge',
+        accountIndex: 0 as never,
+        lifecycle: { documentId, instanceId },
+      }
+    );
+  const closeFromPage = (sender: FakeSender, instanceId: string, documentId = 'doc-1') =>
+    mod.closeNativeNotificationFromPage({ sender } as never, { documentId, instanceId });
+  return { mod, win, show, closeFromPage };
 }
 
 describe('nativeNotification', () => {
@@ -404,6 +497,304 @@ describe('nativeNotification', () => {
       }
       await vi.advanceTimersByTimeAsync(10000);
       vi.useRealTimers();
+    });
+  });
+
+  describe('page-correlated instances', () => {
+    it('blocks shows, focus, and page events while shutdown waits for earlier cleanup', async () => {
+      const { mod, show, win, closeFromPage } = await loadPageHelpers();
+      const { closeStartupAdmission } = await import('../lifecycle/startupAdmission.js');
+      const sender = makeSender(1);
+      show(sender, 'clicked', 'tag-clicked');
+      show(sender, 'closed', 'tag-closed');
+      const clicked = nativeFor('clicked');
+      const closed = nativeFor('closed');
+      clicked.closeMode = 'silent';
+      const replayStale = captureStaleCallbacks(clicked);
+      const earlierCleanup = Promise.withResolvers<void>();
+      const cleanup = earlierCleanup.promise.then(() => mod.cleanupActiveNativeNotifications());
+
+      // before-quit closes this shared admission synchronously, before awaiting feature cleanup.
+      closeStartupAdmission();
+      clicked.simulateClick();
+      closed.emitClose();
+      expect(show(sender, 'late', 'tag-late')).toBe(false);
+      expect(
+        mod.showNativeNotification(
+          { title: 'late-delta' },
+          { focusWindow: win as never, source: 'unread-delta' }
+        )
+      ).toBe(false);
+      expect(FakeNotification.history).toHaveLength(2);
+      expect(clicked.closeCalls).toBe(0);
+      expect(sender.send).not.toHaveBeenCalled();
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+
+      earlierCleanup.resolve();
+      await cleanup;
+      mod.cleanupActiveNativeNotifications();
+      replayStale();
+      expect(clicked.closeCalls).toBe(1);
+      expect(closed.closeCalls).toBe(0);
+      expect(closeFromPage(sender, 'clicked')).toBe(false);
+      expect(sender.listenerCount('did-start-navigation')).toBe(0);
+      expect(sender.send).not.toHaveBeenCalled();
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+    });
+
+    it('focuses then delivers a single click, and later duplicates do nothing', async () => {
+      const { show, win } = await loadPageHelpers();
+      const sender = makeSender(1);
+      expect(show(sender, 'n1', 'tag-1')).toBe(true);
+      const native = nativeFor('n1');
+
+      native.simulateClick();
+      native.simulateClick();
+
+      expect(focusNotificationSourceMock).toHaveBeenCalledTimes(1);
+      expect(focusNotificationSourceMock).toHaveBeenCalledWith({ sender }, win);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('click', 'n1')]);
+      expect(focusNotificationSourceMock.mock.invocationCallOrder[0]).toBeLessThan(
+        sender.send.mock.invocationCallOrder[0] ?? 0
+      );
+    });
+
+    it('keeps focusing on every click for an uncorrelated show', async () => {
+      const { mod, win } = await loadPageHelpers();
+      mod.showNativeNotification({ title: 'delta', tag: 'delta' }, { focusWindow: win as never });
+      const native = nativeFor('delta');
+
+      native.simulateClick();
+      native.simulateClick();
+
+      expect(focusNotificationSourceMock).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['emit', 'silent', 'throw'] as const)(
+      'settles a page close once without echo when native close %s',
+      async (closeMode) => {
+        const { show, closeFromPage } = await loadPageHelpers();
+        const sender = makeSender(1);
+        show(sender, 'n1', 'tag-1');
+        const native = nativeFor('n1');
+        native.closeMode = closeMode;
+        const replayStale = captureStaleCallbacks(native);
+
+        expect(closeFromPage(sender, 'n1')).toBe(true);
+        expect(closeFromPage(sender, 'n1')).toBe(false);
+        replayStale();
+
+        expect(native.closeCalls).toBe(1);
+        expect(sender.send).not.toHaveBeenCalled();
+        expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+        expect(native.listenerCount('click') + native.listenerCount('close')).toBe(0);
+        expect(sender.listenerCount('did-start-navigation')).toBe(0);
+        expect(show(sender, 'n1', 'tag-2')).toBe(true);
+      }
+    );
+
+    it('lets a replacement outlive callbacks and close requests of the instance it replaced', async () => {
+      const { show, closeFromPage } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'old', 'same-tag');
+      const old = nativeFor('old');
+      const replayStale = captureStaleCallbacks(old);
+
+      show(sender, 'new', 'same-tag');
+      const replacement = nativeFor('new');
+      replayStale();
+      expect(closeFromPage(sender, 'old')).toBe(false);
+      replacement.simulateClick();
+
+      expect(old.closeCalls).toBe(1);
+      expect(replacement.closeCalls).toBe(0);
+      expect(sender.send.mock.calls).toEqual([
+        lifecycleEvent('close', 'old'),
+        lifecycleEvent('click', 'new'),
+      ]);
+      expect(closeFromPage(sender, 'new')).toBe(true);
+    });
+
+    it('auto-dismisses after 10s with one terminal close and inert later callbacks', async () => {
+      vi.useFakeTimers();
+      const { show, closeFromPage } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      const native = nativeFor('n1');
+      const replayStale = captureStaleCallbacks(native);
+
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(sender.send).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      replayStale();
+
+      expect(native.closeCalls).toBe(1);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('close', 'n1')]);
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+      expect(closeFromPage(sender, 'n1')).toBe(false);
+    });
+
+    it('settles an observed native close once without closing the native object again', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      const native = nativeFor('n1');
+      const replayStale = captureStaleCallbacks(native);
+
+      native.emitClose();
+      replayStale();
+
+      expect(native.closeCalls).toBe(0);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('close', 'n1')]);
+      expect(sender.listenerCount('destroyed')).toBe(0);
+    });
+
+    it('rejects a duplicate live instance without touching the original', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      const original = nativeFor('n1');
+
+      expect(show(sender, 'n1', 'tag-2')).toBe(false);
+      original.simulateClick();
+
+      const shownCopies = FakeNotification.history.filter((n) => n.showCalls > 0);
+      expect(shownCopies).toHaveLength(1);
+      expect(shownCopies[0]).toBe(original);
+      expect(original.closeCalls).toBe(0);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('click', 'n1')]);
+    });
+
+    it('refuses a correlated show whose sender is already destroyed', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      sender.destroy();
+
+      expect(show(sender, 'n1', 'tag-1')).toBe(false);
+      expect(FakeNotification.history).toHaveLength(0);
+    });
+
+    it('releases a failed show, tells the page once, and does not start the cooldown', async () => {
+      const { mod, show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      FakeNotification.showFailure = new Error('show failed');
+
+      expect(show(sender, 'n1', 'tag-1')).toBe(false);
+
+      const native = nativeFor('n1');
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('close', 'n1')]);
+      expect(native.closeCalls).toBe(1);
+      expect(native.listenerCount('click') + native.listenerCount('close')).toBe(0);
+      expect(sender.listenerCount('did-start-navigation')).toBe(0);
+      expect(mod.wasBridgeNotificationRecentlyShown(0 as never)).toBe(false);
+      FakeNotification.showFailure = null;
+      expect(show(sender, 'n1', 'tag-1')).toBe(true);
+    });
+
+    it('tells the page once when notifications are unsupported', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      FakeNotification.isSupported.mockReturnValue(false);
+
+      expect(show(sender, 'n1', 'tag-1')).toBe(false);
+
+      expect(FakeNotification.history).toHaveLength(0);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('close', 'n1')]);
+    });
+
+    it('does not let a close request from another sender or document touch an instance', async () => {
+      const { show, closeFromPage } = await loadPageHelpers();
+      const first = makeSender(1);
+      const second = makeSender(2);
+      show(first, 'n1', 'tag-1');
+      show(second, 'n1', 'tag-2');
+
+      expect(closeFromPage(first, 'n1', 'doc-other')).toBe(false);
+      expect(closeFromPage(first, 'n1')).toBe(true);
+
+      expect(FakeNotification.all).toHaveLength(1);
+      FakeNotification.all[0]?.simulateClick();
+      expect(second.send.mock.calls).toEqual([lifecycleEvent('click', 'n1')]);
+      expect(first.send).not.toHaveBeenCalled();
+    });
+
+    it('invalidates live instances on a cross-document navigation of a surviving WebContents', async () => {
+      const { show, closeFromPage } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      const native = nativeFor('n1');
+      const replayStale = captureStaleCallbacks(native);
+
+      sender.emit('did-start-navigation', MAIN_FRAME_NAVIGATION);
+      replayStale();
+
+      expect(native.closeCalls).toBe(1);
+      expect(sender.send).not.toHaveBeenCalled();
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+      expect(closeFromPage(sender, 'n1')).toBe(false);
+      expect(sender.listenerCount('did-start-navigation')).toBe(0);
+      expect(sender.listenerCount('did-navigate')).toBe(0);
+      expect(show(sender, 'n1', 'tag-1', 'doc-2')).toBe(true);
+    });
+
+    it('invalidates an instance shown while a navigation was pending when it commits', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      sender.emit('did-start-navigation', MAIN_FRAME_NAVIGATION);
+      show(sender, 'n1', 'tag-1');
+
+      sender.emit('did-navigate');
+
+      expect(nativeFor('n1').closeCalls).toBe(1);
+      expect(sender.send).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an in-page navigation', { isMainFrame: true, isSameDocument: true }],
+      ['a subframe navigation', { isMainFrame: false, isSameDocument: false }],
+    ])('keeps instances live across %s', async (_name, details) => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+
+      sender.emit('did-start-navigation', details);
+      nativeFor('n1').simulateClick();
+
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('click', 'n1')]);
+    });
+
+    it('releases instances silently when the sender is destroyed', async () => {
+      const { show } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      const native = nativeFor('n1');
+      const replayStale = captureStaleCallbacks(native);
+
+      sender.destroy();
+      replayStale();
+
+      expect(native.closeCalls).toBe(1);
+      expect(sender.send).not.toHaveBeenCalled();
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+      expect(sender.listenerCount('did-start-navigation')).toBe(0);
+    });
+
+    it('cleanup settles every instance silently and leaves late callbacks inert', async () => {
+      const { mod, show, closeFromPage } = await loadPageHelpers();
+      const sender = makeSender(1);
+      show(sender, 'n1', 'tag-1');
+      show(sender, 'n2', 'tag-2');
+      const natives = [nativeFor('n1'), nativeFor('n2')];
+      const replays = natives.map(captureStaleCallbacks);
+
+      mod.cleanupActiveNativeNotifications();
+      for (const replay of replays) replay();
+
+      expect(natives.map((n) => n.closeCalls)).toEqual([1, 1]);
+      expect(sender.send).not.toHaveBeenCalled();
+      expect(focusNotificationSourceMock).not.toHaveBeenCalled();
+      expect(sender.listenerCount('did-start-navigation')).toBe(0);
+      expect(closeFromPage(sender, 'n1')).toBe(false);
     });
   });
 });

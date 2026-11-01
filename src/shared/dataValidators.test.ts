@@ -28,6 +28,8 @@ import {
   sanitizeHTML,
   validatePasskeyFailureData,
   validateNotificationData,
+  validateNotificationCloseRequest,
+  validateNotificationLifecycleEvent,
   validateAttemptId,
   validateOnlineCheckRequest,
   validateOnlineStatusData,
@@ -324,6 +326,26 @@ describe('validatePasskeyFailureData', () => {
 });
 
 describe('validateNotificationData', () => {
+  it('retains both lifecycle ids without accepting payload account ownership', () => {
+    const input = { title: 'Message', documentId: 'doc-1', instanceId: 'n0', accountIndex: 99 };
+    expect(validateNotificationData(input)).toMatchObject({
+      title: 'Message',
+      documentId: 'doc-1',
+      instanceId: 'n0',
+    });
+    expect(validateNotificationData(input)).not.toHaveProperty('accountIndex');
+  });
+
+  it.each([
+    { documentId: 'doc-1' },
+    { instanceId: 'n0' },
+    { documentId: '', instanceId: 'n0' },
+    { documentId: 'doc-1', instanceId: '   ' },
+    { documentId: 'x'.repeat(129), instanceId: 'n0' },
+    { documentId: 'doc-1', instanceId: 1 },
+  ])('rejects incomplete or malformed lifecycle ids: %j', (ref) => {
+    expect(() => validateNotificationData({ title: 'Message', ...ref })).toThrow();
+  });
   beforeEach(() => {
     vi.mocked(validateNotificationIconURL).mockClear();
     vi.mocked(validateNotificationIconURL).mockImplementation((value: unknown) => {
@@ -444,6 +466,42 @@ describe('validateNotificationData', () => {
     expect(() => validateNotificationData({ title: 'T', tag: longTag })).toThrow(
       'exceeds maximum length'
     );
+  });
+});
+
+describe('notification lifecycle validation', () => {
+  it('retains only the sender-independent instance reference in a close request', () => {
+    expect(
+      validateNotificationCloseRequest({
+        documentId: 'doc-1',
+        instanceId: 'n0',
+        accountIndex: 9,
+        tag: 'room',
+      })
+    ).toEqual({ documentId: 'doc-1', instanceId: 'n0' });
+  });
+
+  it.each(['click', 'close'] as const)('accepts the lifecycle event %s', (type) => {
+    const event = { documentId: 'doc-1', instanceId: 'n0', type };
+    expect(validateNotificationLifecycleEvent(event)).toEqual(event);
+  });
+
+  it.each([null, [], {}, { documentId: 'doc-1' }, { documentId: 'doc-1', instanceId: '' }])(
+    'rejects malformed references at both lifecycle boundaries: %j',
+    (input) => {
+      expect(() => validateNotificationCloseRequest(input)).toThrow();
+      expect(() => validateNotificationLifecycleEvent(input)).toThrow();
+    }
+  );
+
+  it.each(['show', '', undefined, 1])('rejects an unknown event variant: %j', (type) => {
+    expect(() =>
+      validateNotificationLifecycleEvent({
+        documentId: 'doc-1',
+        instanceId: 'n0',
+        type,
+      })
+    ).toThrow();
   });
 });
 

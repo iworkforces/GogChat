@@ -14,12 +14,14 @@ export const IPC_CHANNELS = {
   FAVICON_CHANGED: 'faviconChanged',
   NOTIFICATION_SHOW: 'notificationShow',
   NOTIFICATION_CLICKED: 'notificationClicked',
+  NOTIFICATION_CLOSE: 'notificationClose',
   CHECK_IF_ONLINE: 'checkIfOnline',
   PASSKEY_AUTH_FAILED: 'passkeyAuthFailed',
 
   // From main to renderer
   SEARCH_SHORTCUT: 'searchShortcut',
   ONLINE_STATUS: 'onlineStatus',
+  NOTIFICATION_EVENT: 'notificationEvent',
 } as const satisfies Record<string, string>;
 
 /**

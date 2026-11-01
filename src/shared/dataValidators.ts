@@ -5,10 +5,20 @@
 
 import { BADGE } from './constants.js';
 import { validateNotificationIconURL } from './urlValidators.js';
-import type { OnlineCheckRequest, OnlineStatusData, PasskeyErrorType } from './types/domain.js';
+import type {
+  NotificationCloseRequest,
+  NotificationInstanceRef,
+  NotificationLifecycleEvent,
+  OnlineCheckRequest,
+  OnlineStatusData,
+  PasskeyErrorType,
+} from './types/domain.js';
 
 /** Opaque attempt tokens stay short; UUIDs and similar ids fit well under this. */
 const ATTEMPT_ID_MAX_LENGTH = 128;
+
+/** Document and instance ids are opaque tokens minted by preload and the page wrapper. */
+const CORRELATION_ID_MAX_LENGTH = 128;
 
 /**
  * Validates and sanitizes unread count values
@@ -168,6 +178,8 @@ export function validateNotificationData(data: unknown): {
   icon?: string;
   tag?: string;
   timestamp: number;
+  documentId?: string;
+  instanceId?: string;
 } {
   // Type check
   if (!isSafeObject(data)) {
@@ -184,10 +196,18 @@ export function validateNotificationData(data: unknown): {
     icon?: string;
     tag?: string;
     timestamp: number;
+    documentId?: string;
+    instanceId?: string;
   } = {
     title,
     timestamp: Date.now(),
   };
+
+  if (data['documentId'] !== undefined || data['instanceId'] !== undefined) {
+    const ref = validateInstanceRef(data);
+    result.documentId = ref.documentId;
+    result.instanceId = ref.instanceId;
+  }
 
   if (data['body'] !== undefined && data['body'] !== null && data['body'] !== '') {
     result.body = validateString(data['body'], 5000);
@@ -203,6 +223,48 @@ export function validateNotificationData(data: unknown): {
   }
 
   return result;
+}
+
+function validateCorrelationId(value: unknown, name: string): string {
+  const id = validateString(value, CORRELATION_ID_MAX_LENGTH);
+  if (id.trim().length === 0) {
+    throw new Error(`${name} cannot be empty`);
+  }
+  return id;
+}
+
+/** Both ids are required together: a lone document or instance id is never a valid reference. */
+function validateInstanceRef(data: Record<string, unknown>): NotificationInstanceRef {
+  return {
+    documentId: validateCorrelationId(data['documentId'], 'documentId'),
+    instanceId: validateCorrelationId(data['instanceId'], 'instanceId'),
+  };
+}
+
+/**
+ * Validates a NOTIFICATION_CLOSE request.
+ * @throws Error if the payload is not a plain object with a document and instance id
+ */
+export function validateNotificationCloseRequest(data: unknown): NotificationCloseRequest {
+  if (!isSafeObject(data)) {
+    throw new Error('Notification close request must be a plain object');
+  }
+  return validateInstanceRef(data);
+}
+
+/**
+ * Validates a NOTIFICATION_EVENT delivery.
+ * @throws Error on a non-object, bad ids, or a type other than click/close
+ */
+export function validateNotificationLifecycleEvent(data: unknown): NotificationLifecycleEvent {
+  if (!isSafeObject(data)) {
+    throw new Error('Notification lifecycle event must be a plain object');
+  }
+  const type = data['type'];
+  if (type !== 'click' && type !== 'close') {
+    throw new Error('Unknown notification lifecycle event type');
+  }
+  return { ...validateInstanceRef(data), type };
 }
 
 /**

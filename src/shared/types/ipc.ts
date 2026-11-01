@@ -3,7 +3,9 @@
  */
 
 import type {
+  NotificationCloseRequest,
   NotificationData,
+  NotificationLifecycleEvent,
   OnlineCheckRequest,
   OnlineStatusData,
   PasskeyFailureData,
@@ -59,11 +61,13 @@ export interface IPCChannelPayloadMap {
   [IPC_CHANNELS.FAVICON_CHANGED]: string;
   [IPC_CHANNELS.NOTIFICATION_SHOW]: NotificationData;
   [IPC_CHANNELS.NOTIFICATION_CLICKED]: void;
+  [IPC_CHANNELS.NOTIFICATION_CLOSE]: NotificationCloseRequest;
   [IPC_CHANNELS.CHECK_IF_ONLINE]: OnlineCheckRequest;
   [IPC_CHANNELS.PASSKEY_AUTH_FAILED]: PasskeyFailureData;
   // main → renderer
   [IPC_CHANNELS.SEARCH_SHORTCUT]: void;
   [IPC_CHANNELS.ONLINE_STATUS]: OnlineStatusData;
+  [IPC_CHANNELS.NOTIFICATION_EVENT]: NotificationLifecycleEvent;
 }
 
 /**
@@ -81,10 +85,12 @@ export interface IPCResponsePayloadMap {
   [IPC_CHANNELS.FAVICON_CHANGED]: void; // fire-and-forget
   [IPC_CHANNELS.NOTIFICATION_SHOW]: void; // fire-and-forget
   [IPC_CHANNELS.NOTIFICATION_CLICKED]: void; // fire-and-forget
+  [IPC_CHANNELS.NOTIFICATION_CLOSE]: void; // fire-and-forget
   [IPC_CHANNELS.CHECK_IF_ONLINE]: void; // fire-and-forget
   [IPC_CHANNELS.PASSKEY_AUTH_FAILED]: void; // fire-and-forget
   [IPC_CHANNELS.SEARCH_SHORTCUT]: void; // fire-and-forget
   [IPC_CHANNELS.ONLINE_STATUS]: void; // fire-and-forget
+  [IPC_CHANNELS.NOTIFICATION_EVENT]: void; // fire-and-forget
 }
 
 /** Maps an IPC channel name to its request type (e.g. "config:get" → RequestConfigPayload) */

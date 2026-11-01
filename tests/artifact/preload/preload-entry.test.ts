@@ -10,8 +10,10 @@ import path from 'node:path';
 import { _electron as electron, expect, test } from '@playwright/test';
 import { IPC_CHANNELS } from '../../../src/shared/constants.js';
 import { validateOnlineCheckRequest } from '../../../src/shared/dataValidators.js';
+import type { OnlineStatusData } from '../../../src/shared/types/domain.js';
 import urls from '../../../src/urls.js';
 import { closeElectronApp } from '../../helpers/electron-test';
+import { exerciseBuiltNotificationWrapper } from '../../helpers/notificationArtifactProbe.js';
 
 declare global {
   interface Window {
@@ -72,6 +74,7 @@ for (const channel of [
   'unreadCount',
   'checkIfOnline',
   'notificationShow',
+  'notificationClose',
   'passkeyAuthFailed',
 ]) {
   ipcMain.on(channel, (_event, data) => {
@@ -102,14 +105,42 @@ app.whenReady().then(() => {
 `;
 
 async function recordedIpc(
-  app: Awaited<ReturnType<typeof electron.launch>>
+  app: Awaited<ReturnType<typeof electron.launch>>,
+  expected?: { readonly channel: string; readonly data?: unknown; readonly count?: number }
 ): Promise<Array<{ channel: string; data: unknown }>> {
-  return app.evaluate(({ app: electronApp }) => {
-    return (
-      (electronApp as { __gogchatIpc?: Array<{ channel: string; data: unknown }> }).__gogchatIpc ??
-      []
+  return app.evaluate(async ({ app: electronApp, ipcMain }, wanted) => {
+    const records: Array<{ channel: string; data: unknown }> = Reflect.get(
+      electronApp,
+      '__gogchatIpc'
     );
-  });
+    if (!wanted) return records;
+    const matches = () =>
+      records.filter(
+        (record) =>
+          record.channel === wanted.channel &&
+          (wanted.data === undefined || record.data === wanted.data)
+      ).length >= (wanted.count ?? 1);
+    if (!matches()) {
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          clearTimeout(timer);
+          ipcMain.removeListener(wanted.channel, received);
+        };
+        const received = () => {
+          if (matches()) {
+            finish();
+            resolve();
+          }
+        };
+        const timer = setTimeout(() => {
+          finish();
+          reject(new Error(`Expected built-preload IPC not received: ${wanted.channel}`));
+        }, 5000);
+        ipcMain.on(wanted.channel, received);
+      });
+    }
+    return records;
+  }, expected);
 }
 
 test.describe('built CJS preload entry', () => {
@@ -156,8 +187,7 @@ test.describe('built CJS preload entry', () => {
         'sendUnreadCount',
       ]);
 
-      await page.waitForTimeout(250);
-      const afterLoad = await recordedIpc(app);
+      const afterLoad = await recordedIpc(app, { channel: IPC_CHANNELS.UNREAD_COUNT, data: 3 });
       expect(afterLoad.some((item) => item.channel === 'unreadCount' && item.data === 3)).toBe(
         true
       );
@@ -170,19 +200,19 @@ test.describe('built CJS preload entry', () => {
             'https://www.gstatic.com/images/branding/product/1x/googleg_32dp.png'
           );
       });
-      await page.waitForTimeout(150);
-      const afterFavicon = await recordedIpc(app);
+      const afterFavicon = await recordedIpc(app, {
+        channel: IPC_CHANNELS.FAVICON_CHANGED,
+        data: 'https://www.gstatic.com/images/branding/product/1x/googleg_32dp.png',
+      });
       expect(afterFavicon.some((item) => item.channel === 'faviconChanged')).toBe(true);
 
       await page.evaluate(() => {
         window.gogchat.reportPasskeyFailure('NotAllowedError');
-        window.dispatchEvent(
-          new CustomEvent('__gogchatNotificationShow', {
-            detail: { title: 'hello', body: 'world', tag: 't1' },
-          })
-        );
       });
-      await page.waitForTimeout(50);
+      evidence.push({
+        phase: 'notification-lifecycle',
+        ...(await exerciseBuiltNotificationWrapper(app, page)),
+      });
       const afterBridge = await recordedIpc(app);
       expect(afterBridge.some((item) => item.channel === 'passkeyAuthFailed')).toBe(true);
       expect(afterBridge.some((item) => item.channel === 'notificationShow')).toBe(true);
@@ -191,7 +221,7 @@ test.describe('built CJS preload entry', () => {
         const win = BrowserWindow.getAllWindows()[0];
         win?.webContents.send(channel);
       }, 'searchShortcut');
-      await page.waitForTimeout(50);
+      await page.waitForFunction(() => document.activeElement?.id === 'search');
       const activeId = await page.evaluate(() => document.activeElement?.id);
       expect(activeId).toBe('search');
 
@@ -216,29 +246,28 @@ test.describe('built CJS preload entry', () => {
           window.dispatchEvent(new Event('app:checkIfOnline'));
         });
         requestCount += 1;
-        await expect
-          .poll(
-            async () =>
-              (await recordedIpc(runtime)).filter(
-                (item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE
-              ).length
-          )
-          .toBe(requestCount);
-        const requests = (await recordedIpc(runtime)).filter(
-          (item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE
-        );
+        const requests = (
+          await recordedIpc(runtime, {
+            channel: IPC_CHANNELS.CHECK_IF_ONLINE,
+            count: requestCount,
+          })
+        ).filter((item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE);
         const { attemptId } = validateOnlineCheckRequest(requests[requestCount - 1]?.data);
         evidence.push({ phase: 'request', attemptId, requestCount, url: page.url() });
         return attemptId;
       };
-      const reply = async (attemptId: string, online: boolean) => {
+      const reply = async (attemptId: string, outcome: OnlineStatusData['outcome']) => {
         const received = await page.evaluate(() => window.__statusReplies);
-        evidence.push({ phase: 'reply', attemptId, online });
+        const status: OnlineStatusData =
+          outcome === 'http-error'
+            ? { attemptId, outcome, httpStatus: 503 }
+            : { attemptId, outcome };
+        evidence.push({ phase: 'reply', ...status });
         await runtime.evaluate(
           ({ BrowserWindow }, payload) => {
             BrowserWindow.getAllWindows()[0]?.webContents.send(payload.channel, payload.status);
           },
-          { channel: IPC_CHANNELS.ONLINE_STATUS, status: { attemptId, online } }
+          { channel: IPC_CHANNELS.ONLINE_STATUS, status }
         );
         await page.waitForFunction((count) => window.__statusReplies === count + 1, received);
       };
@@ -262,33 +291,37 @@ test.describe('built CJS preload entry', () => {
           (await recordedIpc(runtime))
             .filter((item) => item.channel === 'fixture:navigation')
             .map((item) => item.data)
-        ).toEqual([localUrl]);
+        ).toEqual([localUrl, localUrl]);
       };
 
       const deadlineSupersededAttemptId = await checkOnline();
       const expiredAttemptId = await checkOnline();
-      await reply(deadlineSupersededAttemptId, true);
-      await reply(deadlineSupersededAttemptId, false);
-      await reply('stale', false);
+      await reply(deadlineSupersededAttemptId, 'online');
+      await reply(deadlineSupersededAttemptId, 'network-error');
+      await reply('stale', 'network-error');
       await retainedDocument('older-replies-before-deadline', 0);
       await page.waitForFunction(() => window.__offlineFailed === 1, undefined, {
         timeout: 10_000,
       });
       await retainedDocument('production-deadline', 1);
       expect(await page.evaluate(() => window.__offlineFailures[0])).toBeGreaterThanOrEqual(5_500);
-      await reply(expiredAttemptId, true);
-      await reply(expiredAttemptId, false);
+      await reply(expiredAttemptId, 'online');
+      await reply(expiredAttemptId, 'network-error');
       await retainedDocument('late-correlated-replies', 1);
 
       const supersededAttemptId = await checkOnline();
       const currentAttemptId = await checkOnline();
       expect(currentAttemptId).not.toBe(supersededAttemptId);
-      await reply('stale', false);
-      await reply(supersededAttemptId, true);
-      await reply(supersededAttemptId, false);
+      await reply('stale', 'network-error');
+      await reply(supersededAttemptId, 'online');
+      await reply(supersededAttemptId, 'network-error');
       await retainedDocument('superseded-replies', 1);
-      await reply(currentAttemptId, false);
-      await retainedDocument('current-false', 2);
+      await reply(currentAttemptId, 'network-error');
+      await retainedDocument('current-network-error', 2);
+      await reply(await checkOnline(), 'http-error');
+      await retainedDocument('current-http-error', 3);
+      await reply(await checkOnline(), 'timeout');
+      await retainedDocument('current-timeout', 4);
 
       const successAttemptId = await checkOnline();
       const appUrl = new URL(urls.appUrl).href;
@@ -300,7 +333,7 @@ test.describe('built CJS preload entry', () => {
         },
         {
           channel: IPC_CHANNELS.ONLINE_STATUS,
-          status: { attemptId: successAttemptId, online: true },
+          status: { attemptId: successAttemptId, outcome: 'online' },
         }
       );
       await page.waitForURL(appUrl, { timeout: 8_000, waitUntil: 'load' });
@@ -310,7 +343,7 @@ test.describe('built CJS preload entry', () => {
       const startedNavigations = (await recordedIpc(runtime))
         .filter((item) => item.channel === 'fixture:navigation')
         .map((item) => item.data);
-      expect(startedNavigations).toEqual([localUrl, appUrl]);
+      expect(startedNavigations).toEqual([localUrl, localUrl, appUrl]);
       evidence.push({
         phase: 'duplicate-current-success',
         expiredAttemptId,

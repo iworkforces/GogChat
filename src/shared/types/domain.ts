@@ -91,6 +91,33 @@ export interface NotificationData {
   readonly icon?: string;
   readonly tag?: string;
   readonly timestamp: number;
+  /** Correlation ids arrive together or not at all; see `NotificationInstanceRef`. */
+  readonly documentId?: string;
+  readonly instanceId?: string;
+}
+
+/**
+ * Identifies one page `Notification` object inside one document.
+ * `documentId` is minted by preload per document, `instanceId` by the page wrapper per object.
+ * Neither names an account: ownership is always derived from the IPC sender in main, and a tag
+ * only drives native replacement.
+ */
+export interface NotificationInstanceRef {
+  readonly documentId: string;
+  readonly instanceId: string;
+}
+
+/** Page → main: dismiss one correlated native notification. */
+export type NotificationCloseRequest = NotificationInstanceRef;
+
+export type NotificationLifecycleEventType = 'click' | 'close';
+
+/**
+ * Main → page: native outcome for one correlated instance. `close` is terminal and delivered at
+ * most once; `click` is delivered at most once while the instance is live.
+ */
+export interface NotificationLifecycleEvent extends NotificationInstanceRef {
+  readonly type: NotificationLifecycleEventType;
 }
 
 /**
