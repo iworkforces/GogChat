@@ -128,12 +128,21 @@ export const DEFERRED_FEATURES = [
     phase: 'deferred',
     description: 'Native notification handler',
     ipcChannels: {
-      listen: [IPC_CHANNELS.NOTIFICATION_SHOW, IPC_CHANNELS.NOTIFICATION_CLICKED],
+      listen: [
+        IPC_CHANNELS.NOTIFICATION_SHOW,
+        IPC_CHANNELS.NOTIFICATION_CLICKED,
+        IPC_CHANNELS.NOTIFICATION_CLOSE,
+      ],
+      emit: [IPC_CHANNELS.NOTIFICATION_EVENT],
     },
     init: async ({ mainWindow }) => {
       if (!mainWindow) return;
       const module = await import('../features/handleNotification.js');
       module.default(mainWindow);
+    },
+    cleanup: async () => {
+      const module = await import('../features/handleNotification.js');
+      module.cleanupNotificationHandler();
     },
   },
   {

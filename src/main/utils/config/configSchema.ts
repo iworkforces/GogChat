@@ -54,6 +54,17 @@ export const schema: Schema<StoreType> = {
         type: 'boolean',
         default: true,
       },
+      updateSnoozedUntil: {
+        type: 'integer',
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
+        default: 0,
+      },
+      sessionMaintenanceMode: {
+        type: 'string',
+        enum: ['default', 'conservative'],
+        default: 'default',
+      },
       autoLaunchAtLogin: {
         type: 'boolean',
         default: true,
@@ -96,6 +107,8 @@ export const schema: Schema<StoreType> = {
     },
     default: {
       autoCheckForUpdates: true,
+      updateSnoozedUntil: 0,
+      sessionMaintenanceMode: 'default',
       autoLaunchAtLogin: true,
       startHidden: false,
       hideMenuBar: false,

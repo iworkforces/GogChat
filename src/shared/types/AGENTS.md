@@ -9,7 +9,7 @@ This directory defines contracts crossing main, preload, tests, and shared valid
 - `branded.ts` - allowed branded casts and helpers such as `asValidatedURL`, `asAccountIndex`, `toPartition`, and `asWebContentsId`.
 - `bridge.ts` - preload-exposed API surface.
 - `config.ts` - shared config shape (`AppConfig`, `MemoryConfig`, notification/WCV/label keys). `memory.v8HeapCapMB` is schema-only; startup heap uses env/`js-flags`.
-- `domain.ts` - app domain payload types (`OnlineCheckRequest` / `OnlineStatusData` carry `attemptId`). Do not treat leftover `PerformanceMetrics` here as the CI export contract (`performanceTypes.ts` in main owns that).
+- `domain.ts` - app domain payload types (`OnlineCheckRequest` / `OnlineStatusData` carry `attemptId`; `OnlineStatusData` is a discriminated `outcome` union of `online`, `http-error` with `httpStatus`, `network-error`, and `timeout`, with no free-text field). Do not treat leftover `PerformanceMetrics` here as the CI export contract (`performanceTypes.ts` in main owns that).
 - `errors.ts` - typed error codes and app error shapes. `CERTIFICATE_PINNING_FAILED` remains in the union after pinning removal; do not reintroduce `certificate-error` listeners.
 - `ipc.ts` - IPC payload/response maps.
 - `window.ts` - `IAccountWindowManager`, `AccountWebContentsInfo`, `AccountBackendKind`, and account window contracts.

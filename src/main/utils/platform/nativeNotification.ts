@@ -8,6 +8,12 @@
  * Owns tag de-dupe, auto-dismiss, click → focus, and per-account bridge cooldown.
  * Account identity (subtitle / groupId / namespaced tag) is applied by callers
  * or via buildAccountAwareNotificationPayload.
+ *
+ * A bridge show may carry a document/instance reference (`lifecycle`). That instance is owned by
+ * the IPC event's sender, delivers at most one click, and settles exactly once whether the OS,
+ * the page, a tag replacement, the auto-dismiss timer, or a navigation/destruction ends it.
+ * Settlement never waits for an OS close callback. Uncorrelated shows (unread-delta) keep the
+ * original tag-keyed behaviour.
  */
 
 import type { BrowserWindow, IpcMainEvent } from 'electron';
@@ -15,8 +21,23 @@ import { Notification } from 'electron';
 import log from 'electron-log';
 import { BADGE, TIMING } from '../../../shared/constants.js';
 import type { AccountIndex } from '../../../shared/types/branded.js';
-import { cancelTrackedTimeout, createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import type { NotificationInstanceRef } from '../../../shared/types/domain.js';
+import { createTrackedTimeout } from '../lifecycle/resourceCleanup.js';
+import { isStartupAdmissionOpen } from '../lifecycle/startupAdmission.js';
+import {
+  announceUnshown,
+  createEntry,
+  settleAllEntries,
+  settleEntry,
+  trackEntry,
+} from './notificationEntry.js';
+import type { ActiveEntry, PageInstance } from './notificationEntry.js';
 import { focusNotificationSource } from './notificationFocus.js';
+import {
+  bindNotificationInstance,
+  releaseNotificationInstanceFromPage,
+  resetNotificationInstances,
+} from './notificationLifecycle.js';
 import {
   accountNotificationGroupId,
   formatAccountNotificationLabel,
@@ -46,15 +67,9 @@ export type ShowNativeNotificationOptions = {
   readonly source?: NativeNotificationSource;
   /** Account used for cooldown bookkeeping (derived from sender). */
   readonly accountIndex?: AccountIndex | null;
+  /** Page object this show belongs to; requires `ipcEvent`, whose sender owns the instance. */
+  readonly lifecycle?: NotificationInstanceRef;
 };
-
-type ActiveEntry = {
-  notification: Notification;
-  timeout: ReturnType<typeof setTimeout>;
-  trackingKey: string;
-};
-
-const activeNotifications = new Map<string, ActiveEntry>();
 
 /** Monotonic tracking keys for untagged notifications so cleanup can find them. */
 let trackingIdCounter = 0;
@@ -119,15 +134,31 @@ export function buildAccountAwareNotificationPayload(options: {
 
 /**
  * Show a validated native OS notification.
- * Returns false when unsupported, suppressed by cooldown, or show failed.
+ * Returns false when unsupported, suppressed by cooldown, a duplicate live instance, or show
+ * failed. A failed correlated show releases its registration and tells the page it ended; it
+ * never claims the OS displayed anything.
  */
 export function showNativeNotification(
   payload: NativeNotificationPayload,
   options: ShowNativeNotificationOptions
 ): boolean {
+  if (!isStartupAdmissionOpen()) {
+    return false;
+  }
+  const sender = options.ipcEvent?.sender;
+  if (options.lifecycle !== undefined && (sender === undefined || sender.isDestroyed())) {
+    log.debug('[NativeNotification] Ignoring correlated show without a live sender');
+    return false;
+  }
+  const page: PageInstance | undefined =
+    options.lifecycle !== undefined && sender !== undefined
+      ? { sender, senderId: sender.id, ref: options.lifecycle }
+      : undefined;
+  let entry: ActiveEntry | undefined;
   try {
     if (!Notification.isSupported()) {
       log.warn('[NativeNotification] Desktop notifications are not supported; ignoring show');
+      announceUnshown(page);
       return false;
     }
 
@@ -167,38 +198,22 @@ export function showNativeNotification(
     });
 
     const trackingKey = payload.tag ?? `__gogchat-notif-${trackingIdCounter++}`;
-    const focusWindow = options.focusWindow;
-    const ipcEvent = options.ipcEvent;
+    const { focusWindow, ipcEvent } = options;
+    const created = createEntry(notification, trackingKey, page, () =>
+      focusNotificationSource(ipcEvent, focusWindow)
+    );
+    entry = created;
 
-    notification.on('click', () => {
-      try {
-        focusNotificationSource(ipcEvent, focusWindow);
-      } catch (error: unknown) {
-        log.error('[NativeNotification] Failed to handle notification click:', error);
-      }
-    });
-
-    notification.on('close', () => {
-      const entry = activeNotifications.get(trackingKey);
-      if (entry && entry.notification === notification) {
-        cancelTrackedTimeout(entry.timeout);
-        activeNotifications.delete(trackingKey);
-      }
-      log.debug('[NativeNotification] Notification closed:', payload.title);
-    });
-
-    if (payload.tag) {
-      const existing = activeNotifications.get(trackingKey);
-      if (existing) {
-        cancelTrackedTimeout(existing.timeout);
-        activeNotifications.delete(trackingKey);
-        try {
-          existing.notification.close();
-        } catch {
-          // ignore
-        }
-      }
+    if (
+      page &&
+      !bindNotificationInstance(page.sender, page.ref, (why) => settleEntry(created, why))
+    ) {
+      created.detachNative();
+      log.warn('[NativeNotification] Ignoring show for an instance that is already live');
+      return false;
     }
+
+    trackEntry(created);
 
     notification.show();
 
@@ -206,41 +221,51 @@ export function showNativeNotification(
       markBridgeNotificationShown(accountIndex);
     }
 
-    const timeout = createTrackedTimeout(
-      () => {
-        try {
-          notification.close();
+    if (!created.settled) {
+      created.timeout = createTrackedTimeout(
+        () => {
           log.debug('[NativeNotification] Notification auto-dismissed after 10s:', payload.title);
-        } catch (error: unknown) {
-          log.error('[NativeNotification] Failed to auto-dismiss notification:', error);
-        }
-      },
-      TIMING.NOTIFICATION_AUTO_DISMISS,
-      'notification-auto-dismiss'
-    );
-
-    activeNotifications.set(trackingKey, { notification, timeout, trackingKey });
+          settleEntry(created, 'auto-dismiss');
+        },
+        TIMING.NOTIFICATION_AUTO_DISMISS,
+        'notification-auto-dismiss'
+      );
+    }
 
     return true;
   } catch (error: unknown) {
     log.error('[NativeNotification] Failed to create notification:', error);
+    if (entry) {
+      settleEntry(entry, 'show-failed');
+    } else {
+      announceUnshown(page);
+    }
     return false;
   }
 }
 
 /**
- * Close all tracked notifications and clear timers (feature cleanup).
+ * Page-requested dismissal. Authorized by the sender's own registrations, so another sender's or
+ * document's ids (or a tag) never match. Returns false when nothing live matched.
+ */
+export function closeNativeNotificationFromPage(
+  event: IpcMainEvent,
+  ref: NotificationInstanceRef
+): boolean {
+  const sender = event.sender;
+  if (sender.isDestroyed()) {
+    return false;
+  }
+  return releaseNotificationInstanceFromPage(sender.id, ref);
+}
+
+/**
+ * Close all tracked notifications and clear timers and listeners (feature cleanup).
+ * Silent: pages get no event after cleanup begins.
  */
 export function cleanupActiveNativeNotifications(): void {
-  activeNotifications.forEach((entry) => {
-    cancelTrackedTimeout(entry.timeout);
-    try {
-      entry.notification.close();
-    } catch {
-      // ignore
-    }
-  });
-  activeNotifications.clear();
+  settleAllEntries();
+  resetNotificationInstances();
 }
 
 /**

@@ -19,6 +19,7 @@ import type { StoreType } from '../../src/shared/types/config.js';
 import {
   closeElectronApp,
   launchElectronAppWithWindow,
+  wrapEvaluateWithGcRetry,
   type LaunchedElectronApp,
 } from '../helpers/electron-test';
 import {
@@ -27,9 +28,37 @@ import {
   temptingStableRelease,
   type GithubUpdateFixtureKind,
 } from '../helpers/githubReleaseFixtures';
+import {
+  activeUserDataDir,
+  launchEnv,
+  quitApp,
+  relaunchProfile,
+  seedStoredApp,
+} from '../helpers/profileRestart';
+import {
+  armNextFetch,
+  awaitArmedFetch,
+  clickMenu,
+  clickUpdateButton,
+  closeUpdateWindow,
+  fetchCount,
+  holdFetches,
+  installUpdateProbe,
+  menuState,
+  openedUrls,
+  releaseFetches,
+  restoreUpdateProbe,
+  setSnoozedUntil,
+  settleBackgroundCheck,
+  snoozeState,
+  startBackgroundCheck,
+  updateHooksInstalled,
+  updateMenuInstalled,
+  updateWindow,
+} from '../helpers/updateSnoozeProbe';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
-const APP_PATH = path.join(PROJECT_ROOT, 'lib/main/index.js');
+const APP_PATH = PROJECT_ROOT;
 const FEATURE_CHUNK = path.join(PROJECT_ROOT, 'lib/chunks/appUpdates.js');
 
 const SILENT_KINDS: readonly GithubUpdateFixtureKind[] = [
@@ -334,6 +363,162 @@ test.describe('background update silence', () => {
       expect(again.snapshots.some((snap) => snap.phase === 'checking')).toBe(false);
       expect(again.snapshots.some((snap) => snap.message === 'New release available')).toBe(true);
       expect(again.openedUrls).toEqual([GITHUB_UPDATE_STABLE_URL]);
+    } finally {
+      if (app) {
+        await closeElectronApp(app);
+        teardown.push('electron-app-closed');
+      }
+      await rm(userData, { recursive: true, force: true });
+      await rm(`${userData}-a1`, { recursive: true, force: true });
+      await rm(`${userData}-a2`, { recursive: true, force: true });
+      teardown.push(`userData-removed:${userData}`);
+      console.log(JSON.stringify({ teardown }));
+    }
+  });
+});
+
+const DAY_MS = 86_400_000;
+const SNOOZE_ITEM = ['Preferences', 'Snooze Update Prompts for 24 Hours'] as const;
+const RESUME_ITEM = ['Preferences', 'Resume Update Prompts'] as const;
+
+async function waitForUpdateSurface(app: LaunchedElectronApp): Promise<void> {
+  wrapEvaluateWithGcRetry(app);
+  await expect.poll(() => updateHooksInstalled(app), { timeout: 30_000 }).toBe(true);
+  await expect.poll(() => updateMenuInstalled(app), { timeout: 30_000 }).toBe(true);
+}
+
+async function promptMessage(app: LaunchedElectronApp): Promise<string | null> {
+  return (await updateWindow(app))?.message ?? null;
+}
+
+async function takeDownload(app: LaunchedElectronApp, expectedOpens: string[]): Promise<void> {
+  await expect.poll(() => promptMessage(app), { timeout: 15_000 }).toBe('New release available');
+  await clickUpdateButton(app, 0);
+  await expect.poll(() => openedUrls(app), { timeout: 15_000 }).toEqual(expectedOpens);
+  await closeUpdateWindow(app);
+}
+
+test.describe('background update snooze', () => {
+  test('is controlled from the native menu, survives a restart, expires, and wins races', async () => {
+    test.setTimeout(240_000);
+    const userData = await realpath(await mkdtemp(path.join(tmpdir(), 'gogchat-update-snooze-')));
+    const stableFixture = githubUpdateFixture('stable', GITHUB_UPDATE_STABLE_URL);
+    const seededDeadline = Date.now() + DAY_MS;
+    let app: LaunchedElectronApp | undefined;
+    const teardown: string[] = [];
+
+    try {
+      seedStoredApp(userData, {
+        autoLaunchAtLogin: false,
+        notificationPermissionRequested: true,
+        updateSnoozedUntil: seededDeadline,
+      });
+      app = (
+        await launchElectronAppWithWindow({
+          appPath: APP_PATH,
+          cwd: PROJECT_ROOT,
+          userDataDir: userData,
+          env: launchEnv(),
+        })
+      ).app;
+      await waitForUpdateSurface(app);
+      await installUpdateProbe(app, stableFixture);
+
+      // A future deadline in the store is restored with one armed timer; auto-check stays on.
+      expect(await snoozeState(app)).toEqual({
+        deadline: seededDeadline,
+        active: true,
+        timerArmed: true,
+      });
+      expect(await menuState(app)).toEqual({
+        snoozeEnabled: false,
+        resumeEnabled: true,
+        autoCheckChecked: true,
+        checkForUpdatesEnabled: true,
+      });
+      await startBackgroundCheck(app);
+      await settleBackgroundCheck(app);
+      expect(await fetchCount(app)).toBe(0);
+      expect(await updateWindow(app)).toBeNull();
+
+      // Early resume from the native menu offers exactly one check.
+      await armNextFetch(app);
+      await clickMenu(app, RESUME_ITEM);
+      await awaitArmedFetch(app);
+      await takeDownload(app, [GITHUB_UPDATE_STABLE_URL]);
+      expect(await fetchCount(app)).toBe(1);
+      expect(await snoozeState(app)).toEqual({ deadline: 0, active: false, timerArmed: false });
+      expect(await menuState(app)).toMatchObject({
+        snoozeEnabled: true,
+        resumeEnabled: false,
+        autoCheckChecked: true,
+      });
+
+      // Snooze from the native menu stores wall time plus 24 hours and arms the timer.
+      const clicked = await clickMenu(app, SNOOZE_ITEM);
+      const snoozed = await snoozeState(app);
+      expect(snoozed.active).toBe(true);
+      expect(snoozed.timerArmed).toBe(true);
+      expect(snoozed.deadline - DAY_MS).toBeGreaterThanOrEqual(clicked.before);
+      expect(snoozed.deadline - DAY_MS).toBeLessThanOrEqual(clicked.after);
+      expect(await menuState(app)).toMatchObject({
+        snoozeEnabled: false,
+        resumeEnabled: true,
+        autoCheckChecked: true,
+      });
+
+      // The same profile restarts snoozed: restored deadline, armed timer, suppressed check.
+      const profileDir = await activeUserDataDir(app);
+      await quitApp(app);
+      app = await relaunchProfile({ appPath: APP_PATH, cwd: PROJECT_ROOT, profileDir });
+      await waitForUpdateSurface(app);
+      await installUpdateProbe(app, stableFixture);
+      expect(await snoozeState(app)).toEqual({
+        deadline: snoozed.deadline,
+        active: true,
+        timerArmed: true,
+      });
+      expect(await menuState(app)).toMatchObject({
+        snoozeEnabled: false,
+        resumeEnabled: true,
+        autoCheckChecked: true,
+      });
+      await startBackgroundCheck(app);
+      await settleBackgroundCheck(app);
+      expect(await fetchCount(app)).toBe(0);
+
+      // A short deadline expires through the real timer and offers one check; the menu follows.
+      await armNextFetch(app);
+      const shortDeadline = Date.now() + 3_000;
+      expect(await setSnoozedUntil(app, shortDeadline)).toBe(true);
+      expect(await snoozeState(app)).toEqual({
+        deadline: shortDeadline,
+        active: true,
+        timerArmed: true,
+      });
+      await awaitArmedFetch(app);
+      await takeDownload(app, [GITHUB_UPDATE_STABLE_URL]);
+      expect(await fetchCount(app)).toBe(1);
+      expect(await snoozeState(app)).toMatchObject({ active: false, timerArmed: false });
+      await expect
+        .poll(() => menuState(app), { timeout: 15_000 })
+        .toMatchObject({ snoozeEnabled: true, resumeEnabled: false, autoCheckChecked: true });
+
+      // Snooze then resume while a fetch is in flight: the old fetch never prompts and
+      // the resume's own offer is not queued behind the held session gate.
+      await holdFetches(app);
+      await armNextFetch(app);
+      await startBackgroundCheck(app);
+      await awaitArmedFetch(app);
+      await clickMenu(app, SNOOZE_ITEM);
+      await clickMenu(app, RESUME_ITEM);
+      await releaseFetches(app);
+      await settleBackgroundCheck(app);
+      expect(await updateWindow(app)).toBeNull();
+      expect(await openedUrls(app)).toEqual([GITHUB_UPDATE_STABLE_URL]);
+      expect(await fetchCount(app)).toBe(2);
+      expect(await snoozeState(app)).toEqual({ deadline: 0, active: false, timerArmed: false });
+      await restoreUpdateProbe(app);
     } finally {
       if (app) {
         await closeElectronApp(app);

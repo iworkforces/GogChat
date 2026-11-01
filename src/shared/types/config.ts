@@ -5,10 +5,24 @@
 import type { WindowState, AccountWindowsMap } from './window.js';
 
 /**
+ * Periodic account-session maintenance policy. `conservative` skips only the
+ * periodic HTTP-cache and service-worker clearing; code-cache trimming and
+ * memory-pressure dehydration are unchanged.
+ */
+export type SessionMaintenanceMode = 'default' | 'conservative';
+
+/**
  * Application configuration
  */
 export interface AppConfig {
   autoCheckForUpdates: boolean;
+  /**
+   * Unix-millisecond wall-clock deadline until which automatic update prompts
+   * are snoozed. 0 means inactive; independent of `autoCheckForUpdates`.
+   */
+  updateSnoozedUntil: number;
+  /** Periodic session-maintenance policy, read on every maintenance tick. */
+  sessionMaintenanceMode: SessionMaintenanceMode;
   autoLaunchAtLogin: boolean;
   startHidden: boolean;
   hideMenuBar: boolean;

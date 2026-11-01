@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import log from 'electron-log';
 import { IPC_CHANNELS, TIMING } from '../../shared/constants.js';
 import { validateOnlineCheckRequest } from '../../shared/dataValidators.js';
+import { sanitizeLogError } from '../../shared/logSanitizer.js';
+import type { OnlineProbeResult, OnlineStatusData } from '../../shared/types/domain.js';
 import { defineIPC } from '../utils/ipc/defineIPC.js';
 import { createTrackedTimeout, cancelTrackedTimeout } from '../utils/lifecycle/resourceCleanup.js';
 import { getIconCache } from '../utils/platform/iconCache.js';
@@ -73,16 +75,32 @@ function senderIsGone(sender: WebContents): boolean {
   }
 }
 
+/** External cancellation is not a probe outcome: callers drop it silently. */
+type ProbeSettlement = OnlineProbeResult | { readonly outcome: 'cancelled' };
+
+const CANCELLED: ProbeSettlement = { outcome: 'cancelled' };
+
+/** Only a real 3xx-5xx status is reportable; anything else (e.g. 0) is a failed request. */
+function isHttpErrorStatus(status: unknown): status is number {
+  return typeof status === 'number' && Number.isInteger(status) && status >= 300 && status <= 599;
+}
+
 /**
- * Check internet connectivity using native fetch
- * Uses Google's generate_204 endpoint which is designed for connectivity checks
+ * Probe internet connectivity using native fetch.
+ * Uses Google's generate_204 endpoint which is designed for connectivity checks.
+ * Success stays `response.ok`; the probe's own deadline is `timeout`; an abort of
+ * `externalSignal` settles as `cancelled`.
  */
-const checkIfOnline = async (
+const probeOnline = async (
   timeout: number = TIMING.CONNECTIVITY_CHECK_FAST,
   externalSignal?: AbortSignal
-): Promise<boolean> => {
+): Promise<ProbeSettlement> => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  let deadlineElapsed = false;
+  const timeoutId = setTimeout(() => {
+    deadlineElapsed = true;
+    controller.abort();
+  }, timeout);
   const onExternalAbort = (): void => {
     controller.abort();
   };
@@ -90,7 +108,7 @@ const checkIfOnline = async (
   if (externalSignal) {
     if (externalSignal.aborted) {
       clearTimeout(timeoutId);
-      return false;
+      return CANCELLED;
     }
     externalSignal.addEventListener('abort', onExternalAbort, { once: true });
   }
@@ -101,13 +119,27 @@ const checkIfOnline = async (
       signal: controller.signal,
       cache: 'no-cache',
     });
-    return response.ok;
-  } catch (error: unknown) {
-    log.debug(
-      '[Connectivity] Offline or fetch failed:',
-      error instanceof Error ? error.message : 'Unknown error'
-    );
-    return false;
+    if (externalSignal?.aborted) {
+      return CANCELLED;
+    }
+    if (deadlineElapsed) {
+      return { outcome: 'timeout' };
+    }
+    if (response.ok) {
+      return { outcome: 'online' };
+    }
+    return isHttpErrorStatus(response.status)
+      ? { outcome: 'http-error', httpStatus: response.status }
+      : { outcome: 'network-error' };
+  } catch {
+    if (externalSignal?.aborted) {
+      return CANCELLED;
+    }
+    const settlement: ProbeSettlement = deadlineElapsed
+      ? { outcome: 'timeout' }
+      : { outcome: 'network-error' };
+    log.debug(`[Connectivity] Probe failed: ${settlement.outcome}`);
+    return settlement;
   } finally {
     clearTimeout(timeoutId);
     externalSignal?.removeEventListener('abort', onExternalAbort);
@@ -119,9 +151,8 @@ function replyIfCurrent(
   sender: WebContents,
   senderId: number,
   generation: number,
-  attemptId: string,
-  controller: AbortController,
-  online: boolean
+  status: OnlineStatusData,
+  controller: AbortController
 ): void {
   if (controller.signal.aborted) {
     return;
@@ -134,7 +165,7 @@ function replyIfCurrent(
     if (senderIsGone(sender)) {
       return;
     }
-    event.reply(IPC_CHANNELS.ONLINE_STATUS, { attemptId, online });
+    event.reply(IPC_CHANNELS.ONLINE_STATUS, status);
   } catch {
     // Send raced a destroy between the liveness check and reply.
   }
@@ -152,12 +183,22 @@ function beginProbeFetch(
   void (async () => {
     try {
       log.debug('[Connectivity] Checking online status...');
-      const online = await checkIfOnline(TIMING.CONNECTIVITY_CHECK, controller.signal);
-      replyIfCurrent(event, sender, senderId, generation, attemptId, controller, online);
-      log.debug(`[Connectivity] Online status: ${online}`);
+      const settlement = await probeOnline(TIMING.CONNECTIVITY_CHECK, controller.signal);
+      if (settlement.outcome === 'cancelled') {
+        return;
+      }
+      replyIfCurrent(event, sender, senderId, generation, { attemptId, ...settlement }, controller);
+      log.debug(`[Connectivity] Online status: ${settlement.outcome}`);
     } catch (error: unknown) {
-      log.error('[Connectivity] Failed to handle checkIfOnline:', error);
-      replyIfCurrent(event, sender, senderId, generation, attemptId, controller, false);
+      log.error('[Connectivity] Failed to handle checkIfOnline:', sanitizeLogError(error));
+      replyIfCurrent(
+        event,
+        sender,
+        senderId,
+        generation,
+        { attemptId, outcome: 'network-error' },
+        controller
+      );
     } finally {
       const current = activeProbes.get(senderId);
       if (current?.generation === generation) {
@@ -287,15 +328,15 @@ function captureInitialDocument(manager: IAccountWindowManager) {
 
   const run = async (): Promise<void> => {
     if (!isCurrent()) return;
-    const fastOnline = await checkIfOnline(TIMING.CONNECTIVITY_CHECK_FAST, controller.signal);
-    if (!isCurrent()) return;
-    if (fastOnline) {
+    const fast = await probeOnline(TIMING.CONNECTIVITY_CHECK_FAST, controller.signal);
+    if (!isCurrent() || fast.outcome === 'cancelled') return;
+    if (fast.outcome === 'online') {
       dispose();
       return;
     }
-    const online = await checkIfOnline(TIMING.CONNECTIVITY_CHECK, controller.signal);
-    if (!isCurrent()) return;
-    if (online) {
+    const confirmation = await probeOnline(TIMING.CONNECTIVITY_CHECK, controller.signal);
+    if (!isCurrent() || confirmation.outcome === 'cancelled') return;
+    if (confirmation.outcome === 'online') {
       dispose();
       return;
     }

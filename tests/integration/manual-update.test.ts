@@ -6,7 +6,7 @@
  * network access is required.
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,7 @@ import { expect, test } from '@playwright/test';
 import {
   closeElectronApp,
   launchElectronAppWithWindow,
+  wrapEvaluateWithGcRetry,
   type LaunchedElectronApp,
 } from '../helpers/electron-test';
 import {
@@ -21,9 +22,28 @@ import {
   githubUpdateFixture,
   type GithubUpdateFixtureKind,
 } from '../helpers/githubReleaseFixtures';
+import { launchEnv, seedStoredApp } from '../helpers/profileRestart';
+import {
+  armNextFetch,
+  awaitArmedFetch,
+  clickMenu,
+  clickUpdateButton,
+  closeUpdateWindow,
+  fetchCount,
+  holdFetches,
+  installUpdateProbe,
+  menuState,
+  openedUrls,
+  releaseFetches,
+  restoreUpdateProbe,
+  snoozeState,
+  updateHooksInstalled,
+  updateMenuInstalled,
+  updateWindow,
+} from '../helpers/updateSnoozeProbe';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
-const APP_PATH = path.join(PROJECT_ROOT, 'lib/main/index.js');
+const APP_PATH = PROJECT_ROOT;
 const FEATURE_CHUNK = path.join(PROJECT_ROOT, 'lib/chunks/appUpdates.js');
 
 const STABLE_URL = GITHUB_UPDATE_STABLE_URL;
@@ -378,6 +398,102 @@ test.describe('manual update liveness', () => {
         teardown.push('electron-app-closed');
       }
       await rm(userData, { recursive: true, force: true });
+      teardown.push(`userData-removed:${userData}`);
+      console.log(JSON.stringify({ teardown }));
+    }
+  });
+});
+
+const CHECK_ITEM = ['Help', 'Check For Updates'] as const;
+const RESUME_ITEM = ['Preferences', 'Resume Update Prompts'] as const;
+
+test.describe('manual update during a snooze', () => {
+  test('stays available, leaves the snooze alone, and still waits for a background session', async () => {
+    test.setTimeout(180_000);
+    const userData = await realpath(await mkdtemp(path.join(tmpdir(), 'gogchat-manual-snooze-')));
+    const seededDeadline = Date.now() + 86_400_000;
+    let app: LaunchedElectronApp | undefined;
+    const teardown: string[] = [];
+
+    const message = async (target: LaunchedElectronApp): Promise<string | null> =>
+      (await updateWindow(target))?.message ?? null;
+
+    try {
+      seedStoredApp(userData, {
+        autoLaunchAtLogin: false,
+        notificationPermissionRequested: true,
+        updateSnoozedUntil: seededDeadline,
+      });
+      app = (
+        await launchElectronAppWithWindow({
+          appPath: APP_PATH,
+          cwd: PROJECT_ROOT,
+          userDataDir: userData,
+          env: launchEnv(),
+        })
+      ).app;
+      wrapEvaluateWithGcRetry(app);
+      await expect.poll(() => updateHooksInstalled(app!), { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => updateMenuInstalled(app!), { timeout: 30_000 }).toBe(true);
+      await installUpdateProbe(app, githubUpdateFixture('stable', STABLE_URL));
+
+      // Help > Check For Updates is enabled and runs while the prompts are snoozed.
+      expect(await menuState(app)).toMatchObject({
+        checkForUpdatesEnabled: true,
+        resumeEnabled: true,
+        snoozeEnabled: false,
+        autoCheckChecked: true,
+      });
+      await armNextFetch(app);
+      await clickMenu(app, CHECK_ITEM);
+      await awaitArmedFetch(app);
+      await expect.poll(() => message(app!), { timeout: 15_000 }).toBe('New release available');
+      await clickUpdateButton(app, 0);
+      await expect.poll(() => openedUrls(app!), { timeout: 15_000 }).toEqual([STABLE_URL]);
+      await closeUpdateWindow(app);
+      expect(await fetchCount(app)).toBe(1);
+      expect(await snoozeState(app)).toEqual({
+        deadline: seededDeadline,
+        active: true,
+        timerArmed: true,
+      });
+      expect(await menuState(app)).toMatchObject({ autoCheckChecked: true, resumeEnabled: true });
+
+      // Resume starts a held background session; a manual click waits behind it without
+      // opening any dialog, then runs once the background prompt is dismissed.
+      await holdFetches(app);
+      await armNextFetch(app);
+      await clickMenu(app, RESUME_ITEM);
+      await awaitArmedFetch(app);
+      await clickMenu(app, CHECK_ITEM);
+      expect(await updateWindow(app)).toBeNull();
+      expect(await fetchCount(app)).toBe(2);
+
+      await armNextFetch(app);
+      await releaseFetches(app);
+      await expect.poll(() => message(app!), { timeout: 15_000 }).toBe('New release available');
+      expect(await fetchCount(app)).toBe(2);
+      await closeUpdateWindow(app);
+
+      await awaitArmedFetch(app);
+      await expect.poll(() => message(app!), { timeout: 15_000 }).toBe('New release available');
+      expect(await fetchCount(app)).toBe(3);
+      await clickUpdateButton(app, 0);
+      await expect
+        .poll(() => openedUrls(app!), { timeout: 15_000 })
+        .toEqual([STABLE_URL, STABLE_URL]);
+      await closeUpdateWindow(app);
+      expect(await snoozeState(app)).toEqual({ deadline: 0, active: false, timerArmed: false });
+      expect(await menuState(app)).toMatchObject({ autoCheckChecked: true });
+      await restoreUpdateProbe(app);
+    } finally {
+      if (app) {
+        await closeElectronApp(app);
+        teardown.push('electron-app-closed');
+      }
+      await rm(userData, { recursive: true, force: true });
+      await rm(`${userData}-a1`, { recursive: true, force: true });
+      await rm(`${userData}-a2`, { recursive: true, force: true });
       teardown.push(`userData-removed:${userData}`);
       console.log(JSON.stringify({ teardown }));
     }

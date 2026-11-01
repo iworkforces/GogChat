@@ -5,10 +5,20 @@
 
 import { BADGE } from './constants.js';
 import { validateNotificationIconURL } from './urlValidators.js';
-import type { OnlineCheckRequest, OnlineStatusData, PasskeyErrorType } from './types/domain.js';
+import type {
+  NotificationCloseRequest,
+  NotificationInstanceRef,
+  NotificationLifecycleEvent,
+  OnlineCheckRequest,
+  OnlineStatusData,
+  PasskeyErrorType,
+} from './types/domain.js';
 
 /** Opaque attempt tokens stay short; UUIDs and similar ids fit well under this. */
 const ATTEMPT_ID_MAX_LENGTH = 128;
+
+/** Document and instance ids are opaque tokens minted by preload and the page wrapper. */
+const CORRELATION_ID_MAX_LENGTH = 128;
 
 /**
  * Validates and sanitizes unread count values
@@ -168,6 +178,8 @@ export function validateNotificationData(data: unknown): {
   icon?: string;
   tag?: string;
   timestamp: number;
+  documentId?: string;
+  instanceId?: string;
 } {
   // Type check
   if (!isSafeObject(data)) {
@@ -184,10 +196,18 @@ export function validateNotificationData(data: unknown): {
     icon?: string;
     tag?: string;
     timestamp: number;
+    documentId?: string;
+    instanceId?: string;
   } = {
     title,
     timestamp: Date.now(),
   };
+
+  if (data['documentId'] !== undefined || data['instanceId'] !== undefined) {
+    const ref = validateInstanceRef(data);
+    result.documentId = ref.documentId;
+    result.instanceId = ref.instanceId;
+  }
 
   if (data['body'] !== undefined && data['body'] !== null && data['body'] !== '') {
     result.body = validateString(data['body'], 5000);
@@ -203,6 +223,48 @@ export function validateNotificationData(data: unknown): {
   }
 
   return result;
+}
+
+function validateCorrelationId(value: unknown, name: string): string {
+  const id = validateString(value, CORRELATION_ID_MAX_LENGTH);
+  if (id.trim().length === 0) {
+    throw new Error(`${name} cannot be empty`);
+  }
+  return id;
+}
+
+/** Both ids are required together: a lone document or instance id is never a valid reference. */
+function validateInstanceRef(data: Record<string, unknown>): NotificationInstanceRef {
+  return {
+    documentId: validateCorrelationId(data['documentId'], 'documentId'),
+    instanceId: validateCorrelationId(data['instanceId'], 'instanceId'),
+  };
+}
+
+/**
+ * Validates a NOTIFICATION_CLOSE request.
+ * @throws Error if the payload is not a plain object with a document and instance id
+ */
+export function validateNotificationCloseRequest(data: unknown): NotificationCloseRequest {
+  if (!isSafeObject(data)) {
+    throw new Error('Notification close request must be a plain object');
+  }
+  return validateInstanceRef(data);
+}
+
+/**
+ * Validates a NOTIFICATION_EVENT delivery.
+ * @throws Error on a non-object, bad ids, or a type other than click/close
+ */
+export function validateNotificationLifecycleEvent(data: unknown): NotificationLifecycleEvent {
+  if (!isSafeObject(data)) {
+    throw new Error('Notification lifecycle event must be a plain object');
+  }
+  const type = data['type'];
+  if (type !== 'click' && type !== 'close') {
+    throw new Error('Unknown notification lifecycle event type');
+  }
+  return { ...validateInstanceRef(data), type };
 }
 
 /**
@@ -228,19 +290,45 @@ export function validateOnlineCheckRequest(data: unknown): OnlineCheckRequest {
   return { attemptId: validateAttemptId(data['attemptId']) };
 }
 
+/** Non-2xx statuses a `response.ok === false` fetch can surface. */
+const HTTP_ERROR_STATUS_MIN = 300;
+const HTTP_ERROR_STATUS_MAX = 599;
+
+function validateHttpErrorStatus(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < HTTP_ERROR_STATUS_MIN ||
+    value > HTTP_ERROR_STATUS_MAX
+  ) {
+    throw new Error('httpStatus must be an integer HTTP error status');
+  }
+  return value;
+}
+
 /**
- * Validates an ONLINE_STATUS response payload.
- * @throws Error if the payload is not a plain object with attemptId + boolean online
+ * Validates an ONLINE_STATUS response payload into a fresh discriminated
+ * result. Unknown keys (including raw error text) are never copied.
+ * @throws Error on a non-object, bad attemptId, unknown outcome, or a status
+ *   that is missing from `http-error` or present on any other outcome
  */
 export function validateOnlineStatusData(data: unknown): OnlineStatusData {
   if (!isSafeObject(data)) {
     throw new Error('Online status must be a plain object');
   }
-  if (typeof data['online'] !== 'boolean') {
-    throw new Error('online must be a boolean');
+  const attemptId = validateAttemptId(data['attemptId']);
+  const outcome = data['outcome'];
+  switch (outcome) {
+    case 'http-error':
+      return { attemptId, outcome, httpStatus: validateHttpErrorStatus(data['httpStatus']) };
+    case 'online':
+    case 'network-error':
+    case 'timeout':
+      if (data['httpStatus'] !== undefined) {
+        throw new Error('httpStatus is only valid for http-error');
+      }
+      return { attemptId, outcome };
+    default:
+      throw new Error('Unknown online status outcome');
   }
-  return {
-    attemptId: validateAttemptId(data['attemptId']),
-    online: data['online'],
-  };
 }

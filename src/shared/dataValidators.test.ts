@@ -28,6 +28,8 @@ import {
   sanitizeHTML,
   validatePasskeyFailureData,
   validateNotificationData,
+  validateNotificationCloseRequest,
+  validateNotificationLifecycleEvent,
   validateAttemptId,
   validateOnlineCheckRequest,
   validateOnlineStatusData,
@@ -324,6 +326,26 @@ describe('validatePasskeyFailureData', () => {
 });
 
 describe('validateNotificationData', () => {
+  it('retains both lifecycle ids without accepting payload account ownership', () => {
+    const input = { title: 'Message', documentId: 'doc-1', instanceId: 'n0', accountIndex: 99 };
+    expect(validateNotificationData(input)).toMatchObject({
+      title: 'Message',
+      documentId: 'doc-1',
+      instanceId: 'n0',
+    });
+    expect(validateNotificationData(input)).not.toHaveProperty('accountIndex');
+  });
+
+  it.each([
+    { documentId: 'doc-1' },
+    { instanceId: 'n0' },
+    { documentId: '', instanceId: 'n0' },
+    { documentId: 'doc-1', instanceId: '   ' },
+    { documentId: 'x'.repeat(129), instanceId: 'n0' },
+    { documentId: 'doc-1', instanceId: 1 },
+  ])('rejects incomplete or malformed lifecycle ids: %j', (ref) => {
+    expect(() => validateNotificationData({ title: 'Message', ...ref })).toThrow();
+  });
   beforeEach(() => {
     vi.mocked(validateNotificationIconURL).mockClear();
     vi.mocked(validateNotificationIconURL).mockImplementation((value: unknown) => {
@@ -447,6 +469,42 @@ describe('validateNotificationData', () => {
   });
 });
 
+describe('notification lifecycle validation', () => {
+  it('retains only the sender-independent instance reference in a close request', () => {
+    expect(
+      validateNotificationCloseRequest({
+        documentId: 'doc-1',
+        instanceId: 'n0',
+        accountIndex: 9,
+        tag: 'room',
+      })
+    ).toEqual({ documentId: 'doc-1', instanceId: 'n0' });
+  });
+
+  it.each(['click', 'close'] as const)('accepts the lifecycle event %s', (type) => {
+    const event = { documentId: 'doc-1', instanceId: 'n0', type };
+    expect(validateNotificationLifecycleEvent(event)).toEqual(event);
+  });
+
+  it.each([null, [], {}, { documentId: 'doc-1' }, { documentId: 'doc-1', instanceId: '' }])(
+    'rejects malformed references at both lifecycle boundaries: %j',
+    (input) => {
+      expect(() => validateNotificationCloseRequest(input)).toThrow();
+      expect(() => validateNotificationLifecycleEvent(input)).toThrow();
+    }
+  );
+
+  it.each(['show', '', undefined, 1])('rejects an unknown event variant: %j', (type) => {
+    expect(() =>
+      validateNotificationLifecycleEvent({
+        documentId: 'doc-1',
+        instanceId: 'n0',
+        type,
+      })
+    ).toThrow();
+  });
+});
+
 describe('validateAttemptId', () => {
   it('accepts a non-empty opaque id', () => {
     expect(validateAttemptId('attempt-1')).toBe('attempt-1');
@@ -474,22 +532,57 @@ describe('validateOnlineCheckRequest', () => {
 });
 
 describe('validateOnlineStatusData', () => {
-  it('returns attemptId plus a boolean online flag', () => {
-    expect(validateOnlineStatusData({ attemptId: 'a1', online: true })).toEqual({
-      attemptId: 'a1',
-      online: true,
-    });
-    expect(validateOnlineStatusData({ attemptId: 'a1', online: false })).toEqual({
-      attemptId: 'a1',
-      online: false,
-    });
+  it.each(['online', 'network-error', 'timeout'] as const)(
+    'returns a fresh %s result carrying only attemptId and outcome',
+    (outcome) => {
+      const input = { attemptId: 'a1', outcome, message: 'ECONNRESET to https://x.test/?t=secret' };
+      const result = validateOnlineStatusData(input);
+      expect(result).toEqual({ attemptId: 'a1', outcome });
+      expect(result).not.toBe(input);
+    }
+  );
+
+  it.each([300, 404, 503, 599])('keeps the %i status on an http-error result', (httpStatus) => {
+    expect(
+      validateOnlineStatusData({ attemptId: 'a1', outcome: 'http-error', httpStatus, error: 'x' })
+    ).toEqual({ attemptId: 'a1', outcome: 'http-error', httpStatus });
   });
 
-  it('rejects coerced or missing online flags', () => {
-    expect(() => validateOnlineStatusData({ attemptId: 'a1', online: 'true' })).toThrow(
-      'online must be a boolean'
+  it.each([undefined, null, '503', 503.5, NaN, Infinity, 0, 100, 204, 299, 600, -1])(
+    'rejects http-error with status %s',
+    (httpStatus) => {
+      expect(() =>
+        validateOnlineStatusData({ attemptId: 'a1', outcome: 'http-error', httpStatus })
+      ).toThrow('httpStatus must be an integer HTTP error status');
+    }
+  );
+
+  it.each(['online', 'network-error', 'timeout'])('rejects a status on %s', (outcome) => {
+    expect(() => validateOnlineStatusData({ attemptId: 'a1', outcome, httpStatus: 503 })).toThrow(
+      'httpStatus is only valid for http-error'
     );
-    expect(() => validateOnlineStatusData({ attemptId: 'a1' })).toThrow('online must be a boolean');
-    expect(() => validateOnlineStatusData(null)).toThrow('must be a plain object');
+  });
+
+  it.each([undefined, null, true, 'offline', 'ONLINE', 'cancelled', 1, {}])(
+    'rejects unknown outcome %s',
+    (outcome) => {
+      expect(() => validateOnlineStatusData({ attemptId: 'a1', outcome })).toThrow(
+        'Unknown online status outcome'
+      );
+    }
+  );
+
+  it('rejects the legacy boolean shape', () => {
+    expect(() => validateOnlineStatusData({ attemptId: 'a1', online: true })).toThrow(
+      'Unknown online status outcome'
+    );
+  });
+
+  it.each([undefined, null, '', '   ', 7, 'a'.repeat(129)])('rejects attemptId %s', (attemptId) => {
+    expect(() => validateOnlineStatusData({ attemptId, outcome: 'online' })).toThrow();
+  });
+
+  it.each([null, undefined, 'online', 1, []])('rejects non-object payload %s', (payload) => {
+    expect(() => validateOnlineStatusData(payload)).toThrow('must be a plain object');
   });
 });

@@ -44,6 +44,7 @@ function makeFakeWindow() {
 
 const showNativeNotificationMock = vi.fn().mockReturnValue(true);
 const cleanupActiveNativeNotificationsMock = vi.fn();
+const closeNativeNotificationFromPageMock = vi.fn();
 const focusNotificationSourceMock = vi.fn();
 const resolveNotificationFocusWindowMock = vi.fn();
 const resolveAccountIndexMock = vi.fn().mockReturnValue(0);
@@ -80,6 +81,7 @@ vi.mock('electron-log', () => ({
 vi.mock('../../shared/constants.js', () => ({
   IPC_CHANNELS: {
     NOTIFICATION_SHOW: 'notificationShow',
+    NOTIFICATION_CLOSE: 'notificationClose',
     NOTIFICATION_CLICKED: 'notificationClicked',
   },
   RATE_LIMITS: {
@@ -89,8 +91,17 @@ vi.mock('../../shared/constants.js', () => ({
 
 vi.mock('../../shared/dataValidators.js', () => ({
   validateNotificationData: vi.fn(
-    (data) => data as { title: string; body?: string; icon?: string; tag?: string }
+    (data) =>
+      data as {
+        title: string;
+        body?: string;
+        icon?: string;
+        tag?: string;
+        documentId?: string;
+        instanceId?: string;
+      }
   ),
+  validateNotificationCloseRequest: vi.fn((data) => data),
 }));
 
 const defineIPCMock = vi.fn();
@@ -108,6 +119,8 @@ vi.mock('../utils/ipc/rateLimiter.js', () => ({
 vi.mock('../utils/platform/nativeNotification.js', () => ({
   showNativeNotification: (...args: unknown[]) => showNativeNotificationMock(...args),
   cleanupActiveNativeNotifications: () => cleanupActiveNativeNotificationsMock(),
+  closeNativeNotificationFromPage: (...args: unknown[]) =>
+    closeNativeNotificationFromPageMock(...args),
   buildAccountAwareNotificationPayload: (...args: unknown[]) =>
     buildAccountAwarePayloadMock(...(args as [Record<string, unknown>])),
 }));
@@ -139,16 +152,54 @@ describe('handleNotification feature', () => {
     });
   });
 
-  it('sets up NOTIFICATION_SHOW and NOTIFICATION_CLICKED handlers', async () => {
+  async function registeredHandler(channel: string) {
+    const feature = await import('./handleNotification.js');
+    feature.default(fakeWindow as unknown as Electron.BrowserWindow);
+    return defineIPCMock.mock.calls.find(
+      (call: unknown[]) => (call[0] as { channel: string }).channel === channel
+    )?.[0] as { rateLimit: number; handler: (data: unknown, event?: unknown) => void };
+  }
+
+  it('sets up NOTIFICATION_SHOW, NOTIFICATION_CLOSE and NOTIFICATION_CLICKED handlers', async () => {
     const feature = await import('./handleNotification.js');
     feature.default(fakeWindow as unknown as Electron.BrowserWindow);
 
     expect(defineIPCMock).toHaveBeenCalledWith(
-      expect.objectContaining({ channel: 'notificationShow' })
+      expect.objectContaining({ channel: 'notificationShow', rateLimit: 5 })
     );
+    expect(defineIPCMock).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'notificationClose' })
+    );
+    expect(
+      defineIPCMock.mock.calls.find(([config]) => config.channel === 'notificationClose')?.[0]
+    ).not.toHaveProperty('rateLimit');
     expect(defineIPCMock).toHaveBeenCalledWith(
       expect.objectContaining({ channel: 'notificationClicked' })
     );
+  });
+
+  it('passes the document and instance ids to the native show only when both are present', async () => {
+    const { handler } = await registeredHandler('notificationShow');
+    const event = { sender: { id: 42, isDestroyed: () => false } };
+
+    handler({ title: 'Correlated', documentId: 'doc-1', instanceId: 'n1' }, event);
+    handler({ title: 'Uncorrelated' }, event);
+
+    const [correlated, uncorrelated] = showNativeNotificationMock.mock.calls.map(
+      (call: unknown[]) => call[1]
+    );
+    expect(correlated).toMatchObject({ lifecycle: { documentId: 'doc-1', instanceId: 'n1' } });
+    expect(uncorrelated).not.toHaveProperty('lifecycle');
+  });
+
+  it('dismisses through the sender-owned registry, never by payload tag', async () => {
+    const { handler } = await registeredHandler('notificationClose');
+    const event = { sender: { id: 42, isDestroyed: () => false } };
+    const request = { documentId: 'doc-1', instanceId: 'n1' };
+
+    handler(request, event);
+
+    expect(closeNativeNotificationFromPageMock).toHaveBeenCalledWith(event, request);
   });
 
   it('forwards account-aware bridge payload with subtitle and namespaced tag', async () => {
@@ -208,13 +259,26 @@ describe('handleNotification feature', () => {
     expect(focusNotificationSourceMock).toHaveBeenCalledWith(event, fakeWindow);
   });
 
-  it('cleanupNotificationHandler closes native notifications and removes IPC', async () => {
+  it('cleanupNotificationHandler stops intake before draining native notifications', async () => {
+    const order: string[] = [];
+    defineIPCMock.mockImplementation((config: { channel: string }) => () => {
+      order.push(`stop:${config.channel}`);
+    });
+    cleanupActiveNativeNotificationsMock.mockImplementation(() => {
+      order.push('drain');
+    });
     const feature = await import('./handleNotification.js');
     feature.default(fakeWindow as unknown as Electron.BrowserWindow);
 
     feature.cleanupNotificationHandler();
+    feature.cleanupNotificationHandler();
 
-    expect(cleanupActiveNativeNotificationsMock).toHaveBeenCalled();
-    expect(() => feature.cleanupNotificationHandler()).not.toThrow();
+    expect(order.slice(0, 4)).toEqual([
+      'stop:notificationShow',
+      'stop:notificationClose',
+      'drain',
+      'stop:notificationClicked',
+    ]);
+    expect(order.slice(4)).toEqual(['drain']);
   });
 });

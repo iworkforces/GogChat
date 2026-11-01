@@ -98,7 +98,7 @@ describe('inOnline defineIPC pipeline', () => {
     await vi.waitFor(() =>
       expect(event.reply).toHaveBeenCalledWith(IPC_CHANNELS.ONLINE_STATUS, {
         attemptId: 'two',
-        online: true,
+        outcome: 'online',
       })
     );
     expect(event.reply).toHaveBeenCalledTimes(1);

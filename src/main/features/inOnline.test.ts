@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { pathToFileURL } from 'node:url';
+import { validateOnlineStatusData } from '../../shared/dataValidators.js';
 import { asType } from '../../shared/typeUtils.js';
 import type { IAccountWindowManager } from '../../shared/types/window.js';
 
@@ -634,25 +635,63 @@ describe('inOnline feature', () => {
       await vi.waitFor(() =>
         expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'ok-1',
-          online: true,
+          outcome: 'online',
         })
       );
       vi.unstubAllGlobals();
     });
 
-    it('replies false when the probe rejects', async () => {
-      vi.stubGlobal('fetch', vi.fn().mockRejectedValue('down'));
+    it('replies network-error without error text when the probe rejects', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(new Error('getaddrinfo ENOTFOUND www.google.com?token=secret'))
+      );
       const win = makeFakeWindow() as unknown as Electron.BrowserWindow;
       const feature = await import('./inOnline.js');
       feature.default(win);
       const event = makeReplyEvent(2);
       getOnlineIpc().handler({ attemptId: 'down-1' }, event);
-      await vi.waitFor(() =>
-        expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
-          attemptId: 'down-1',
-          online: false,
-        })
-      );
+      await vi.waitFor(() => expect(event.reply).toHaveBeenCalledTimes(1));
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'down-1',
+        outcome: 'network-error',
+      });
+      vi.unstubAllGlobals();
+    });
+
+    it.each([
+      [503, { outcome: 'http-error', httpStatus: 503 }],
+      [404, { outcome: 'http-error', httpStatus: 404 }],
+      [302, { outcome: 'http-error', httpStatus: 302 }],
+      [0, { outcome: 'network-error' }],
+      [undefined, { outcome: 'network-error' }],
+    ])('classifies a non-OK response with status %s', async (status, expected) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status }));
+      const win = makeFakeWindow() as unknown as Electron.BrowserWindow;
+      const feature = await import('./inOnline.js');
+      feature.default(win);
+      const event = makeReplyEvent(3);
+      getOnlineIpc().handler({ attemptId: 'http-1' }, event);
+      await vi.waitFor(() => expect(event.reply).toHaveBeenCalledTimes(1));
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'http-1',
+        ...expected,
+      });
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps response.ok as the only success policy', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 503 }));
+      const win = makeFakeWindow() as unknown as Electron.BrowserWindow;
+      const feature = await import('./inOnline.js');
+      feature.default(win);
+      const event = makeReplyEvent(4);
+      getOnlineIpc().handler({ attemptId: 'ok-policy' }, event);
+      await vi.waitFor(() => expect(event.reply).toHaveBeenCalledTimes(1));
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'ok-policy',
+        outcome: 'online',
+      });
       vi.unstubAllGlobals();
     });
   });
@@ -690,13 +729,13 @@ describe('inOnline feature', () => {
   describe('attempt-aware probes', () => {
     function stubPendingFetch() {
       const pending: Array<{
-        resolve: (value: { ok: boolean }) => void;
+        resolve: (value: { ok: boolean; status?: number }) => void;
         reject: (reason?: unknown) => void;
         signal?: AbortSignal;
         aborted: boolean;
       }> = [];
       const fetchMock = vi.fn((_url: string, init?: { signal?: AbortSignal }) => {
-        return new Promise<{ ok: boolean }>((resolve, reject) => {
+        return new Promise<{ ok: boolean; status?: number }>((resolve, reject) => {
           const signal = init?.signal;
           const entry = {
             resolve,
@@ -746,7 +785,7 @@ describe('inOnline feature', () => {
       await vi.waitFor(() =>
         expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'fast',
-          online: true,
+          outcome: 'online',
         })
       );
       expect(event.reply).toHaveBeenCalledTimes(1);
@@ -774,7 +813,7 @@ describe('inOnline feature', () => {
       await vi.waitFor(() =>
         expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'third',
-          online: true,
+          outcome: 'online',
         })
       );
       expect(event.reply).toHaveBeenCalledTimes(1);
@@ -800,7 +839,7 @@ describe('inOnline feature', () => {
       await vi.waitFor(() =>
         expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'reused',
-          online: true,
+          outcome: 'online',
         })
       );
       expect(event.reply).toHaveBeenCalledTimes(1);
@@ -821,17 +860,18 @@ describe('inOnline feature', () => {
       await vi.waitFor(() => expect(pending.length).toBe(2));
 
       pending[0]?.resolve({ ok: true });
-      pending[1]?.resolve({ ok: false });
+      pending[1]?.resolve({ ok: false, status: 503 });
       await vi.waitFor(() =>
         expect(first.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'sender-a',
-          online: true,
+          outcome: 'online',
         })
       );
       await vi.waitFor(() =>
         expect(second.reply).toHaveBeenCalledWith('onlineStatus', {
           attemptId: 'sender-b',
-          online: false,
+          outcome: 'http-error',
+          httpStatus: 503,
         })
       );
     });
@@ -943,6 +983,245 @@ describe('inOnline feature', () => {
       expect(() => feature.cleanupConnectivityHandler()).not.toThrow();
       await vi.waitFor(() => expect(settled).toHaveBeenCalled());
       expect(event.reply).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('probe deadlines and races', () => {
+    const PROBE_DEADLINE_MS = 5_000;
+
+    function stubDeadlineFetch(options: { honorAbort: boolean }) {
+      const pending: Array<{
+        signal: AbortSignal | undefined;
+        resolve: (value: { ok: boolean; status?: number }) => void;
+      }> = [];
+      const fetchMock = vi.fn((_url: string, init?: { signal?: AbortSignal }) => {
+        return new Promise<{ ok: boolean; status?: number }>((resolve, reject) => {
+          const signal = init?.signal;
+          pending.push({ signal, resolve });
+          if (options.honorAbort) {
+            signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true }
+            );
+          }
+        });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return { fetchMock, pending };
+    }
+
+    async function startFeature() {
+      const feature = await import('./inOnline.js');
+      feature.default(makeFakeWindow() as unknown as Electron.BrowserWindow);
+      return feature;
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('replies timeout exactly once when the probe deadline elapses', async () => {
+      vi.useFakeTimers();
+      stubDeadlineFetch({ honorAbort: true });
+      const feature = await startFeature();
+      const event = makeReplyEvent(51);
+      getOnlineIpc().handler({ attemptId: 'slow' }, event);
+
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS - 1);
+      expect(event.reply).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(event.reply).toHaveBeenCalledTimes(1);
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'slow',
+        outcome: 'timeout',
+      });
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS * 2);
+      expect(event.reply).toHaveBeenCalledTimes(1);
+      feature.cleanupConnectivityHandler();
+    });
+
+    it('lets a response one tick before the deadline win with no timeout after it', async () => {
+      vi.useFakeTimers();
+      const { pending } = stubDeadlineFetch({ honorAbort: true });
+      const feature = await startFeature();
+      const event = makeReplyEvent(52);
+      getOnlineIpc().handler({ attemptId: 'edge' }, event);
+
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS - 1);
+      pending[0]?.resolve({ ok: false, status: 503 });
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS * 2);
+      expect(event.reply).toHaveBeenCalledTimes(1);
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'edge',
+        outcome: 'http-error',
+        httpStatus: 503,
+      });
+      feature.cleanupConnectivityHandler();
+    });
+
+    it('reports timeout for a late success once the deadline already elapsed', async () => {
+      vi.useFakeTimers();
+      const { pending } = stubDeadlineFetch({ honorAbort: false });
+      const feature = await startFeature();
+      const event = makeReplyEvent(53);
+      getOnlineIpc().handler({ attemptId: 'late' }, event);
+
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS);
+      expect(pending[0]?.signal?.aborted).toBe(true);
+      expect(event.reply).not.toHaveBeenCalled();
+      pending[0]?.resolve({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(event.reply).toHaveBeenCalledTimes(1);
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'late',
+        outcome: 'timeout',
+      });
+      feature.cleanupConnectivityHandler();
+    });
+
+    it('stays silent for a superseded probe whose own deadline passes', async () => {
+      vi.useFakeTimers();
+      const { fetchMock } = stubDeadlineFetch({ honorAbort: true });
+      const feature = await startFeature();
+      const event = makeReplyEvent(54);
+      const cfg = getOnlineIpc();
+      cfg.handler({ attemptId: 'a' }, event);
+      cfg.handler({ attemptId: 'b' }, event);
+
+      await vi.advanceTimersByTimeAsync(feature.ONLINE_FETCH_MIN_INTERVAL_MS);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS - 1);
+      expect(event.reply).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(event.reply).toHaveBeenCalledTimes(1);
+      expect(event.reply).toHaveBeenCalledWith('onlineStatus', {
+        attemptId: 'b',
+        outcome: 'timeout',
+      });
+      feature.cleanupConnectivityHandler();
+    });
+
+    it('stays silent when cleanup lands just before the deadline', async () => {
+      vi.useFakeTimers();
+      stubDeadlineFetch({ honorAbort: true });
+      const feature = await startFeature();
+      const event = makeReplyEvent(55);
+      getOnlineIpc().handler({ attemptId: 'cleanup-edge' }, event);
+
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS - 1);
+      feature.cleanupConnectivityHandler();
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS * 2);
+      expect(event.reply).not.toHaveBeenCalled();
+    });
+
+    it('stays silent when the sender is destroyed just before the deadline', async () => {
+      vi.useFakeTimers();
+      stubDeadlineFetch({ honorAbort: true });
+      const feature = await startFeature();
+      const event = makeReplyEvent(56);
+      getOnlineIpc().handler({ attemptId: 'destroy-edge' }, event);
+
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS - 1);
+      event.sender.destroy();
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS * 2);
+      expect(event.reply).not.toHaveBeenCalled();
+      feature.cleanupConnectivityHandler();
+    });
+
+    it.each([
+      [{ ok: true }, 'online'],
+      [{ ok: false, status: 500 }, 'http-error'],
+    ])('emits a payload the shared validator round-trips for %o', async (response, outcome) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+      const feature = await startFeature();
+      const event = makeReplyEvent(57);
+      getOnlineIpc().handler({ attemptId: 'contract' }, event);
+      await vi.waitFor(() => expect(event.reply).toHaveBeenCalledTimes(1));
+      const payload = event.reply.mock.calls[0]?.[1];
+      expect(validateOnlineStatusData(payload)).toEqual(payload);
+      expect(payload).toMatchObject({ outcome });
+      feature.cleanupConnectivityHandler();
+    });
+  });
+
+  describe('initial connectivity decisions', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('stays on the page when the fast probe is a 503 and the confirmation is online', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce({ ok: false, status: 503 })
+          .mockResolvedValueOnce({ ok: true, status: 204 })
+      );
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      await mod.checkForInternet(makeAccountManager(win));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+      const { Notification } = await import('electron');
+      expect(Notification).not.toHaveBeenCalled();
+    });
+
+    it('treats two HTTP errors as offline rather than a truthy success', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      await mod.checkForInternet(makeAccountManager(win));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(win.webContents.loadURL).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the confirmation probe when the fast probe is online', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 204 }));
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      await mod.checkForInternet(makeAccountManager(win));
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+    });
+
+    it('applies the 3000ms fast then 5000ms confirmation deadlines before going offline', async () => {
+      vi.useFakeTimers();
+      const signals: AbortSignal[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((_url: string, init?: { signal?: AbortSignal }) => {
+          return new Promise<never>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal) {
+              signals.push(signal);
+              signal.addEventListener('abort', () => reject(new DOMException('x', 'AbortError')), {
+                once: true,
+              });
+            }
+          });
+        })
+      );
+      const win = makeFakeWindow('https://chat.google.com/u/0');
+      const mod = await import('./inOnline.js');
+      const run = mod.checkForInternet(makeAccountManager(win));
+
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(signals).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(signals[1]?.aborted).toBe(false);
+      expect(win.webContents.loadURL).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await run;
+      expect(signals[1]?.aborted).toBe(true);
+      expect(win.webContents.loadURL).toHaveBeenCalledTimes(1);
     });
   });
 });

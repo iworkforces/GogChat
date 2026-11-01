@@ -43,13 +43,21 @@ export interface OnlineCheckRequest {
 }
 
 /**
+ * Classified connectivity probe result. Mutually exclusive variants:
+ * only `http-error` carries a status, and no variant carries raw error text.
+ * `online` is the sole success (`response.ok`).
+ */
+export type OnlineProbeResult =
+  | { readonly outcome: 'online' }
+  | { readonly outcome: 'http-error'; readonly httpStatus: number }
+  | { readonly outcome: 'network-error' }
+  | { readonly outcome: 'timeout' };
+
+/**
  * Main → renderer connectivity probe result.
  * Preload must ignore a payload whose `attemptId` is not the in-flight attempt.
  */
-export interface OnlineStatusData {
-  readonly attemptId: string;
-  readonly online: boolean;
-}
+export type OnlineStatusData = OnlineProbeResult & { readonly attemptId: string };
 
 /**
  * Passkey authentication failure data
@@ -83,6 +91,33 @@ export interface NotificationData {
   readonly icon?: string;
   readonly tag?: string;
   readonly timestamp: number;
+  /** Correlation ids arrive together or not at all; see `NotificationInstanceRef`. */
+  readonly documentId?: string;
+  readonly instanceId?: string;
+}
+
+/**
+ * Identifies one page `Notification` object inside one document.
+ * `documentId` is minted by preload per document, `instanceId` by the page wrapper per object.
+ * Neither names an account: ownership is always derived from the IPC sender in main, and a tag
+ * only drives native replacement.
+ */
+export interface NotificationInstanceRef {
+  readonly documentId: string;
+  readonly instanceId: string;
+}
+
+/** Page → main: dismiss one correlated native notification. */
+export type NotificationCloseRequest = NotificationInstanceRef;
+
+export type NotificationLifecycleEventType = 'click' | 'close';
+
+/**
+ * Main → page: native outcome for one correlated instance. `close` is terminal and delivered at
+ * most once; `click` is delivered at most once while the instance is live.
+ */
+export interface NotificationLifecycleEvent extends NotificationInstanceRef {
+  readonly type: NotificationLifecycleEventType;
 }
 
 /**

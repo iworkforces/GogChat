@@ -8,17 +8,17 @@
 
 - No preload and no IPC (and no Electron APIs).
 - Communicate retry intent with DOM events such as `window.dispatchEvent(new Event('app:checkIfOnline'))`.
-- Preload answers false online checks with `app:onlineCheckFailed`; this page re-enables the retry control without reloading the document.
+- Preload answers every failed check with a `CustomEvent` `app:onlineCheckFailed` whose `detail` is `{ outcome: 'http-error', httpStatus } | { outcome: 'network-error' } | { outcome: 'timeout' }`. This page shows distinct feedback in `#retry-status` and re-enables the retry control without reloading the document. Unusable detail falls back to a generic message; the status is rendered only when it is an integer 300-599, always via `textContent`.
 - Keep the script self-contained/IIFE-friendly.
 - `setInterval` is intentionally untracked here because this is not main-process code.
 - `MAX_AUTO_ATTEMPT_COUNT` (100) caps automatic retries on a 60s `window.setInterval`, cleared on the 100th dispatch. Manual clicks never consume that budget and still work after exhaustion. The script must not import `src/shared`.
 
 ## Recovery UX contract
 
-- Click / auto-check → disable button, show "Checking...", dispatch `app:checkIfOnline`.
-- Failed check (false from main via preload) → listen for `app:onlineCheckFailed`, restore enabled Retry state. **Zero** `location.reload()` and **zero** app-URL navigation.
+- Click / auto-check → disable button, show "Checking...", clear stale feedback, dispatch `app:checkIfOnline`.
+- Failed check (`http-error`, `network-error`, or `timeout` from main/preload) → listen for `app:onlineCheckFailed`, show the matching feedback, restore enabled Retry state. **Zero** `location.reload()` and **zero** app-URL navigation. No raw error text ever reaches this page.
 - Successful check is handled in preload (`location.replace(appUrl)`); this page does not navigate itself on success.
-- Do not reload the offline document after a false reply; retain the fallback document through failed recovery checks.
+- Do not reload the offline document after a failed reply; retain the fallback document through failed recovery checks.
 
 ## Build contract
 
