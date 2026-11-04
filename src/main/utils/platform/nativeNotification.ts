@@ -32,6 +32,7 @@ import {
   trackEntry,
 } from './notificationEntry.js';
 import type { ActiveEntry, PageInstance } from './notificationEntry.js';
+import { isAccountNotificationMuted } from './accountNotificationMute.js';
 import { focusNotificationSource } from './notificationFocus.js';
 import {
   bindNotificationInstance,
@@ -164,9 +165,14 @@ export function showNativeNotification(
 
     const source = options.source ?? 'bridge';
     const accountIndex =
-      options.accountIndex !== undefined
-        ? options.accountIndex
-        : resolveAccountIndexFromIpcEvent(options.ipcEvent);
+      options.ipcEvent !== undefined
+        ? resolveAccountIndexFromIpcEvent(options.ipcEvent)
+        : (options.accountIndex ?? null);
+
+    if (accountIndex !== null && isAccountNotificationMuted(accountIndex)) {
+      announceUnshown(page);
+      return false;
+    }
 
     if (source === 'unread-delta' && wasBridgeNotificationRecentlyShown(accountIndex)) {
       log.debug(

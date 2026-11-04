@@ -99,6 +99,9 @@ class FakeNotification {
 }
 
 const focusNotificationSourceMock = vi.fn();
+const muteDeadlines = vi.hoisted(() => ({ values: {} as Record<string, number> }));
+
+vi.mock('../../config.js', () => ({ configGet: () => muteDeadlines.values }));
 
 vi.mock('electron', () => ({
   Notification: FakeNotification,
@@ -213,6 +216,7 @@ async function loadPageHelpers() {
 describe('nativeNotification', () => {
   beforeEach(async () => {
     vi.resetModules();
+    muteDeadlines.values = {};
     FakeNotification.resetAll();
     focusNotificationSourceMock.mockClear();
     const mod = await import('./nativeNotification.js');
@@ -303,6 +307,40 @@ describe('nativeNotification', () => {
   });
 
   describe('showNativeNotification', () => {
+    it('suppresses both sources for the resolved account without allocating or consuming cooldown', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1000);
+      muteDeadlines.values = { '2': 2000 };
+      const identity = await import('./accountNotificationIdentity.js');
+      vi.mocked(identity.resolveAccountIndexFromIpcEvent).mockReturnValue(2 as never);
+      const { showNativeNotification, wasBridgeNotificationRecentlyShown } =
+        await import('./nativeNotification.js');
+      const sender = makeSender(8);
+      const options = { focusWindow: makeWindow() as never, ipcEvent: { sender } as never };
+
+      expect(
+        showNativeNotification(
+          { title: 'bridge' },
+          {
+            ...options,
+            source: 'bridge',
+            accountIndex: 0 as never,
+            lifecycle: { documentId: 'doc-1', instanceId: 'n1' },
+          }
+        )
+      ).toBe(false);
+      expect(
+        showNativeNotification({ title: 'delta' }, { ...options, source: 'unread-delta' })
+      ).toBe(false);
+      expect(FakeNotification.history).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sender.send.mock.calls).toEqual([lifecycleEvent('close', 'n1')]);
+      expect(wasBridgeNotificationRecentlyShown(2 as never)).toBe(false);
+      vi.mocked(identity.resolveAccountIndexFromIpcEvent).mockReturnValue(null);
+      expect(
+        showNativeNotification({ title: 'unknown' }, { ...options, accountIndex: 2 as never })
+      ).toBe(true);
+    });
     it('releases replaced registrations and the current registration on dismissal', async () => {
       vi.useFakeTimers();
       const { showNativeNotification } = await import('./nativeNotification.js');

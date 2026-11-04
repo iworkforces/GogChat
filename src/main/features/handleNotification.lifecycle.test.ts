@@ -7,6 +7,12 @@ import { electronMock } from '../../../tests/mocks/electron.js';
 
 const ipcMain = new EventEmitter();
 const focus = vi.fn();
+const muteState = vi.hoisted(() => ({
+  deadlines: {} as Record<string, number>,
+  account: null as number | null,
+}));
+
+vi.mock('../config.js', () => ({ configGet: () => muteState.deadlines }));
 
 class NativeBanner extends EventEmitter {
   static readonly shown: NativeBanner[] = [];
@@ -38,7 +44,7 @@ vi.mock('../utils/platform/notificationFocus.js', () => ({
   resolveNotificationFocusWindow: (_event: unknown, window: BrowserWindow) => window,
 }));
 vi.mock('../utils/platform/accountNotificationIdentity.js', () => ({
-  resolveAccountIndexFromIpcEvent: () => null,
+  resolveAccountIndexFromIpcEvent: () => muteState.account,
   namespaceNotificationTag: (_index: unknown, tag: string) => tag,
   formatAccountNotificationLabel: () => 'GogChat',
   accountNotificationGroupId: () => 'unknown',
@@ -53,7 +59,43 @@ afterEach(async () => {
   cleanup.destroyCleanupManager();
   ipcMain.removeAllListeners();
   NativeBanner.shown.length = 0;
+  muteState.deadlines = {};
+  muteState.account = null;
   vi.useRealTimers();
+});
+
+it('settles a muted bridge request once without showing a native banner', async () => {
+  muteState.account = 7;
+  muteState.deadlines = { '7': Number.MAX_SAFE_INTEGER };
+  const feature = await import('./handleNotification.js');
+  feature.default(asType<BrowserWindow>({ isDestroyed: () => false }));
+  const sender = asType<WebContents>(
+    Object.assign(new EventEmitter(), {
+      id: 7,
+      isDestroyed: () => false,
+      send: vi.fn(),
+    })
+  );
+  const event = asType<IpcMainEvent>({ sender });
+
+  ipcMain.emit(IPC_CHANNELS.NOTIFICATION_SHOW, event, {
+    title: 'Muted',
+    documentId: 'doc-1',
+    instanceId: 'n1',
+  });
+  ipcMain.emit(IPC_CHANNELS.NOTIFICATION_CLOSE, event, { documentId: 'doc-1', instanceId: 'n1' });
+
+  expect(NativeBanner.shown).toHaveLength(0);
+  expect(vi.mocked(sender.send).mock.calls).toEqual([
+    [
+      IPC_CHANNELS.NOTIFICATION_EVENT,
+      {
+        documentId: 'doc-1',
+        instanceId: 'n1',
+        type: 'close',
+      },
+    ],
+  ]);
 });
 
 it('dismisses an accepted native banner after closes for 51 throttled shows in the same sender window', async () => {
