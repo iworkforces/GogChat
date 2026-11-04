@@ -6,7 +6,7 @@ import type { BrowserWindow, MenuItemConstructorOptions } from 'electron';
 
 vi.mock('electron', () => ({
   Menu: {
-    buildFromTemplate: vi.fn().mockReturnValue({}),
+    buildFromTemplate: vi.fn().mockReturnValue({ getMenuItemById: vi.fn().mockReturnValue(null) }),
     setApplicationMenu: vi.fn(),
   },
   app: {
@@ -23,7 +23,7 @@ vi.mock('electron', () => ({
   clipboard: {
     writeText: vi.fn(),
   },
-  BrowserWindow: vi.fn(),
+  BrowserWindow: { getFocusedWindow: vi.fn(() => null) },
   dialog: {
     showMessageBox: vi.fn().mockResolvedValue({ response: 1 }),
   },
@@ -52,6 +52,11 @@ const {
   mockConfigSet,
   registeredActions,
   configValues,
+  mockAccountIndex,
+  mockIsBootstrap,
+  mockForgetAccount,
+  retained,
+  cleanupTasks,
 } = vi.hoisted(() => ({
   mockAboutHandler: vi.fn(),
   mockAutoLaunchInstance: {
@@ -64,6 +69,11 @@ const {
   mockResumeHandler: vi.fn(() => true),
   mockCheckForUpdatesHandler: vi.fn(),
   mockConfigSet: vi.fn(),
+  mockAccountIndex: vi.fn(() => 0 as number | null),
+  mockIsBootstrap: vi.fn((_index: number) => false),
+  mockForgetAccount: vi.fn(async (_index: number) => {}),
+  retained: { indices: [0, 2, 7] },
+  cleanupTasks: new Map<string, () => void>(),
   registeredActions: {} as Record<string, { label: string; handler: () => void }>,
   configValues: {
     'app.autoCheckForUpdates': true,
@@ -148,7 +158,9 @@ vi.mock('../utils/security/notificationAccess', () => ({
 vi.mock('../utils/account/accountWindowManager.js', () => ({
   getAccountWindowManager: vi.fn(() => ({
     getAccountCount: vi.fn(() => 2),
-    getAccountIndex: vi.fn(() => 0),
+    getAccountIndex: mockAccountIndex,
+    isBootstrap: mockIsBootstrap,
+    forgetAccount: mockForgetAccount,
     getAccountWebContents: vi.fn(() => ({
       isDestroyed: () => false,
       goBack: vi.fn(),
@@ -157,6 +169,14 @@ vi.mock('../utils/account/accountWindowManager.js', () => ({
       getURL: () => 'https://chat.google.com/u/0/',
     })),
   })),
+}));
+
+vi.mock('../utils/account/retainedAccounts.js', () => ({
+  listRetainedAccountIndices: () => retained.indices,
+}));
+
+vi.mock('../utils/lifecycle/resourceCleanup.js', () => ({
+  registerCleanupTask: (name: string, cleanup: () => void) => cleanupTasks.set(name, cleanup),
 }));
 
 vi.mock('../utils/account/accountNavigation.js', () => ({
@@ -188,12 +208,25 @@ import {
   persistAccountWindowsBeforeExit,
 } from '../utils/account/exitAfterAccountWindows.js';
 import { _getMenuAction } from './menuActionRegistry';
-import { Menu, app, _dialog, clipboard } from 'electron';
+import { Menu, app, dialog, clipboard, BrowserWindow as ElectronBrowserWindow } from 'electron';
 import log from 'electron-log';
 import store from '../config';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { openNewGitHubIssue } from '../utils/platform/platformHelpers';
 import { showNotificationSettingsDialog } from '../utils/security/notificationAccess';
+import { asAccountIndex } from '../../shared/types/branded.js';
+import { asType } from '../../shared/typeUtils.js';
+import {
+  clearAllBootstrap,
+  clearBootstrap,
+  isBootstrap,
+  markAsBootstrap,
+  promoteBootstrap,
+} from '../utils/account/bootstrapTracker.js';
+import {
+  clearAccountWebContentsHooksForTests,
+  notifyAccountWebContentsCreated,
+} from '../utils/account/accountWebContentsHooks.js';
 
 interface FakeWindow {
   isDestroyed: ReturnType<typeof vi.fn>;
@@ -242,8 +275,23 @@ describe('appMenu', () => {
     mockSnoozeHandler.mockReturnValue(true);
     mockResumeHandler.mockReturnValue(true);
     mockConfigSet.mockReset();
+    mockAccountIndex.mockReset().mockReturnValue(0);
+    mockIsBootstrap.mockReset().mockReturnValue(false);
+    mockForgetAccount.mockReset().mockResolvedValue(undefined);
+    retained.indices = [0, 2, 7];
+    configValues['app.accountNotificationMuteUntil'] = {};
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 0, checkboxChecked: false });
     delete configValues['app.updateSnoozedUntil'];
     delete configValues['app.sessionMaintenanceMode'];
+    clearAllBootstrap();
+    clearAccountWebContentsHooksForTests();
+  });
+
+  afterEach(() => {
+    for (const cleanup of cleanupTasks.values()) cleanup();
+    cleanupTasks.clear();
   });
 
   it('builds and sets the application menu', () => {
@@ -540,6 +588,253 @@ describe('appMenu', () => {
     relaunch.click();
     await vi.mocked(persistAccountWindowsBeforeExit).mock.results.at(-1)?.value;
     expect(order).toEqual(['persist', 'relaunch', 'exit']);
+  });
+
+  describe('account controls', () => {
+    function items(menu: string): MenuItemConstructorOptions[] {
+      const template = vi
+        .mocked(Menu.buildFromTemplate)
+        .mock.calls.at(-1)?.[0] as MenuItemConstructorOptions[];
+      return template.find((item) => item.label === menu)?.submenu as MenuItemConstructorOptions[];
+    }
+    function item(menu: string, label: string): MenuItemConstructorOptions {
+      const found = items(menu).find((entry) => entry.label === label);
+      if (!found) throw new Error(`Missing ${label}`);
+      return found;
+    }
+    function click(entry: MenuItemConstructorOptions): void {
+      (entry.click as () => void)();
+    }
+
+    it('mutes the account selected at invocation and preserves other deadlines', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1000);
+      configValues['app.accountNotificationMuteUntil'] = { '0': 5000, '7': 9000 };
+      mockConfigSet.mockImplementation((key: string, value: unknown) => {
+        configValues[key] = value;
+      });
+      appMenu(makeFakeWindow() as BrowserWindow);
+      mockAccountIndex.mockReturnValue(2);
+      click(item('Preferences', 'Mute Chat Notifications for One Hour'));
+      expect(mockConfigSet).toHaveBeenCalledWith('app.accountNotificationMuteUntil', {
+        '0': 5000,
+        '2': 3601000,
+        '7': 9000,
+      });
+      expect(item('Preferences', 'Resume Chat Notifications').enabled).toBe(true);
+      click(item('Preferences', 'Resume Chat Notifications'));
+      expect(configValues['app.accountNotificationMuteUntil']).toEqual({ '0': 5000, '7': 9000 });
+      vi.useRealTimers();
+    });
+
+    it('keeps saved menu state when the mute write fails', () => {
+      configValues['app.accountNotificationMuteUntil'] = { '7': 9000 };
+      mockConfigSet.mockImplementation(() => {
+        throw new Error('https://secret.example');
+      });
+      appMenu(makeFakeWindow() as BrowserWindow);
+      const count = vi.mocked(Menu.setApplicationMenu).mock.calls.length;
+      click(item('Preferences', 'Mute Chat Notifications for One Hour'));
+      expect(configValues['app.accountNotificationMuteUntil']).toEqual({ '7': 9000 });
+      expect(Menu.setApplicationMenu).toHaveBeenCalledTimes(count);
+      expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toContain('secret.example');
+    });
+
+    it('uses the focused account window for account zero and WCV host resolution', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1000);
+      const focused = makeFakeWindow();
+      vi.mocked(ElectronBrowserWindow.getFocusedWindow).mockReturnValue(focused as BrowserWindow);
+      appMenu(makeFakeWindow() as BrowserWindow);
+      click(item('Preferences', 'Mute Chat Notifications for One Hour'));
+      expect(mockAccountIndex).toHaveBeenLastCalledWith(focused);
+      expect(mockConfigSet).toHaveBeenCalledWith('app.accountNotificationMuteUntil', {
+        '0': 3601000,
+      });
+      vi.mocked(ElectronBrowserWindow.getFocusedWindow).mockReturnValue(null);
+      vi.useRealTimers();
+    });
+
+    it('updates mute availability on menu opening after expiry or account switching', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1000);
+      configValues['app.accountNotificationMuteUntil'] = { '2': 1001 };
+      mockAccountIndex.mockReturnValue(2);
+      const mute = { enabled: true };
+      const resume = { enabled: false };
+      let open: (() => void) | undefined;
+      vi.mocked(Menu.buildFromTemplate).mockReturnValueOnce({
+        getMenuItemById: (id: string) =>
+          id === 'preferences'
+            ? {
+                submenu: {
+                  on: (_event: string, handler: () => void) => {
+                    open = handler;
+                  },
+                },
+              }
+            : id === 'mute-account-notifications'
+              ? mute
+              : resume,
+      } as never);
+      appMenu(makeFakeWindow() as BrowserWindow);
+      open?.();
+      expect([mute.enabled, resume.enabled]).toEqual([false, true]);
+      vi.setSystemTime(1001);
+      open?.();
+      expect([mute.enabled, resume.enabled]).toEqual([true, false]);
+      mockAccountIndex.mockReturnValue(null);
+      open?.();
+      expect([mute.enabled, resume.enabled]).toEqual([false, false]);
+      vi.useRealTimers();
+    });
+
+    it('offers retained sparse secondary accounts but disables bootstrap accounts', () => {
+      mockIsBootstrap.mockImplementation((index) => index === 7);
+      appMenu(makeFakeWindow() as BrowserWindow);
+      const entries = item('File', 'Forget Account').submenu as MenuItemConstructorOptions[];
+      expect(entries.map(({ label, enabled }) => [label, enabled])).toEqual([
+        ['Account 3', true],
+        ['Account 8', false],
+      ]);
+      click(entries[1] as MenuItemConstructorOptions);
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    });
+
+    it.each(['browser-window', 'web-contents-view'] as const)(
+      'offers newly retained accounts in the same session on %s creation',
+      (backend) => {
+        retained.indices = [0, 2];
+        appMenu(asType<BrowserWindow>(makeFakeWindow()));
+
+        retained.indices.push(7);
+        notifyAccountWebContentsCreated({
+          accountIndex: asAccountIndex(7),
+          webContents: asType<Electron.WebContents>(makeFakeWindow().webContents),
+          backend,
+        });
+
+        const entries = item('File', 'Forget Account').submenu as MenuItemConstructorOptions[];
+        expect(entries.map(({ label, enabled }) => [label, enabled])).toEqual([
+          ['Account 3', true],
+          ['Account 8', true],
+        ]);
+      }
+    );
+
+    it.each([
+      ['promotion', promoteBootstrap],
+      ['clear', clearBootstrap],
+    ] as const)(
+      'enables Forget in the same session after %s clears bootstrap state',
+      (_label, finishBootstrap) => {
+        mockIsBootstrap.mockImplementation(isBootstrap);
+        markAsBootstrap(asAccountIndex(7));
+        appMenu(asType<BrowserWindow>(makeFakeWindow()));
+        const before = item('File', 'Forget Account').submenu as MenuItemConstructorOptions[];
+        expect(before[1]?.enabled).toBe(false);
+
+        finishBootstrap(asAccountIndex(7));
+
+        const after = item('File', 'Forget Account').submenu as MenuItemConstructorOptions[];
+        expect(after[1]?.enabled).toBe(true);
+      }
+    );
+
+    it('disables Forget when an existing account is marked as bootstrap', () => {
+      mockIsBootstrap.mockImplementation(isBootstrap);
+      appMenu(asType<BrowserWindow>(makeFakeWindow()));
+
+      markAsBootstrap(asAccountIndex(7));
+
+      const entries = item('File', 'Forget Account').submenu as MenuItemConstructorOptions[];
+      expect(entries[1]?.enabled).toBe(false);
+    });
+
+    it('unsubscribes lifecycle refreshes on cleanup and resubscribes on initialization', () => {
+      const window = asType<BrowserWindow>(makeFakeWindow());
+      appMenu(window);
+      appMenu(window);
+      for (const cleanup of cleanupTasks.values()) cleanup();
+      vi.mocked(Menu.setApplicationMenu).mockClear();
+
+      markAsBootstrap(asAccountIndex(7));
+      const created = {
+        accountIndex: asAccountIndex(7),
+        webContents: asType<Electron.WebContents>(makeFakeWindow().webContents),
+        backend: 'browser-window' as const,
+      };
+      notifyAccountWebContentsCreated(created);
+      expect(Menu.setApplicationMenu).not.toHaveBeenCalled();
+
+      appMenu(window);
+      vi.mocked(Menu.setApplicationMenu).mockClear();
+      notifyAccountWebContentsCreated(created);
+      expect(Menu.setApplicationMenu).toHaveBeenCalledOnce();
+    });
+
+    it('cancels without forgetting and serializes duplicate confirmation requests', async () => {
+      const confirmation = Promise.withResolvers<{ response: number; checkboxChecked: boolean }>();
+      vi.mocked(dialog.showMessageBox).mockReturnValueOnce(confirmation.promise);
+      appMenu(makeFakeWindow() as BrowserWindow);
+      const entry = (item('File', 'Forget Account').submenu as MenuItemConstructorOptions[])[0];
+      click(entry as MenuItemConstructorOptions);
+      click(entry as MenuItemConstructorOptions);
+      expect(dialog.showMessageBox).toHaveBeenCalledTimes(1);
+      confirmation.resolve({ response: 0, checkboxChecked: false });
+      await confirmation.promise;
+      expect(mockForgetAccount).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds only after confirmed durable forget completes', async () => {
+      const operation = Promise.withResolvers<void>();
+      const started = Promise.withResolvers<void>();
+      const rebuilt = Promise.withResolvers<void>();
+      vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({
+        response: 1,
+        checkboxChecked: false,
+      });
+      mockForgetAccount.mockImplementation(() => {
+        started.resolve();
+        return operation.promise;
+      });
+      appMenu(makeFakeWindow() as BrowserWindow);
+      vi.mocked(Menu.setApplicationMenu).mockImplementationOnce(() => {
+        rebuilt.resolve();
+      });
+      click(
+        (
+          item('File', 'Forget Account').submenu as MenuItemConstructorOptions[]
+        )[1] as MenuItemConstructorOptions
+      );
+      await started.promise;
+      expect(mockForgetAccount).toHaveBeenCalledWith(7);
+      expect(Menu.setApplicationMenu).toHaveBeenCalledTimes(1);
+      operation.resolve();
+      await rebuilt.promise;
+      expect(Menu.setApplicationMenu).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports forget failure without rebuilding as successful', async () => {
+      const reported = Promise.withResolvers<void>();
+      vi.mocked(dialog.showMessageBox)
+        .mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+        .mockImplementationOnce(async () => {
+          reported.resolve();
+          return { response: 0, checkboxChecked: false };
+        });
+      mockForgetAccount.mockRejectedValueOnce(new Error('https://secret.example'));
+      appMenu(makeFakeWindow() as BrowserWindow);
+      click(
+        (
+          item('File', 'Forget Account').submenu as MenuItemConstructorOptions[]
+        )[0] as MenuItemConstructorOptions
+      );
+      await reported.promise;
+      expect(Menu.setApplicationMenu).toHaveBeenCalledTimes(1);
+      expect(dialog.showMessageBox).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toContain('secret.example');
+    });
   });
 
   describe('update snooze and session maintenance preferences', () => {
