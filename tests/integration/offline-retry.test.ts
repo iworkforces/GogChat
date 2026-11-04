@@ -24,6 +24,8 @@ interface RetryProbe {
   contents: WebContents;
   calls: number;
   requests: number;
+  attemptId: string;
+  aborted: boolean;
   methods: (string | undefined)[];
   navigations: string[];
   respond: (status: number) => void;
@@ -201,6 +203,8 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
           contents,
           calls: 0,
           requests: 0,
+          attemptId: '',
+          aborted: false,
           methods: [],
           navigations: [],
           respond: () => {
@@ -210,9 +214,15 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
             throw new Error('No pending fetch');
           },
         };
-        electron.ipcMain.on(channels.CHECK_IF_ONLINE, (event) => {
-          if (event.sender === contents) probe.requests++;
-        });
+        electron.ipcMain.on(
+          channels.CHECK_IF_ONLINE,
+          (event, data: { attemptId: string; operation?: string }) => {
+            if (event.sender === contents) {
+              probe.requests++;
+              if (data.operation !== 'cancel') probe.attemptId = data.attemptId;
+            }
+          }
+        );
         contents.on('did-start-navigation', (details) => {
           if (details.isMainFrame) probe.navigations.push(details.url);
         });
@@ -224,7 +234,10 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
             probe.fail = () => reject(new TypeError('fetch failed: ECONNRESET secret-token'));
             init?.signal?.addEventListener(
               'abort',
-              () => reject(new DOMException('Aborted', 'AbortError')),
+              () => {
+                probe.aborted = true;
+                reject(new DOMException('Aborted', 'AbortError'));
+              },
               { once: true }
             );
           });
@@ -250,11 +263,32 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
       // deterministic outcome through built preload and main, not real reachability.
       await clickRetry(app);
       await waitForCalls(app, 1);
+      await captureFeedback(app, `offline-${backend}-pending.png`);
+      const cancelledId = await main(
+        app,
+        () => Reflect.get(globalThis, '__offlineRetryProbe').attemptId
+      );
+      await clickRetry(app);
+      await expect
+        .poll(() => main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').aborted))
+        .toBe(true);
+      await sendStatus(app, { attemptId: cancelledId, outcome: 'online' });
+      const cancelled = await pageState(app);
+      expect(cancelled).toMatchObject({
+        marker: before.marker,
+        history: before.history,
+        disabled: false,
+        text: 'Retry',
+      });
+      expect(cancelled.feedback).not.toBe('');
+      await captureFeedback(app, `offline-${backend}-cancelled.png`);
+      await clickRetry(app);
+      await waitForCalls(app, 2);
       expect(await pageState(app)).toEqual({
         marker: before.marker,
         history: before.history,
-        disabled: true,
-        text: 'Checking...',
+        disabled: false,
+        text: 'Cancel',
         feedback: '',
       });
       await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').respond(503));
@@ -272,7 +306,7 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
       await sendStatus(app, { attemptId: 'legacy-shape', online: true });
 
       await clickRetry(app);
-      await waitForCalls(app, 2);
+      await waitForCalls(app, 3);
       await sendStatus(app, { attemptId: 'stale-while-pending', outcome: 'timeout' });
       await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').fail());
       await waitForFailures(app, 2);
@@ -289,7 +323,7 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
       await captureFeedback(app, `offline-${backend}-network-error.png`);
 
       await clickRetry(app);
-      await waitForCalls(app, 3);
+      await waitForCalls(app, 4);
       await waitForFailures(app, 3, 12_000);
       const timeoutFeedback = await pageState(app);
       expect(timeoutFeedback).toMatchObject({
@@ -313,7 +347,7 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
       ).toEqual([]);
 
       await clickRetry(app);
-      await waitForCalls(app, 4);
+      await waitForCalls(app, 5);
       await main(app, () => Reflect.get(globalThis, '__offlineRetryProbe').respond(204));
       await expect
         .poll(
@@ -338,8 +372,8 @@ for (const backend of ['browser-window', 'web-contents-view'] as const) {
         };
       });
       expect(result).toEqual({
-        requests: 4,
-        methods: ['HEAD', 'HEAD', 'HEAD', 'HEAD'],
+        requests: 6,
+        methods: ['HEAD', 'HEAD', 'HEAD', 'HEAD', 'HEAD'],
         navigations: ['https://chat.google.com/'],
         history: before.history,
       });

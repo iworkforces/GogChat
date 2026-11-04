@@ -287,7 +287,17 @@ export function validateOnlineCheckRequest(data: unknown): OnlineCheckRequest {
   if (!isSafeObject(data)) {
     throw new Error('Online check request must be a plain object');
   }
-  return { attemptId: validateAttemptId(data['attemptId']) };
+  const attemptId = validateAttemptId(data['attemptId']);
+  switch (data['operation']) {
+    case undefined:
+      return { attemptId };
+    case 'check':
+      return { attemptId, operation: 'check' };
+    case 'cancel':
+      return { attemptId, operation: 'cancel' };
+    default:
+      throw new Error('Unknown online check operation');
+  }
 }
 
 /** Non-2xx statuses a `response.ok === false` fetch can surface. */

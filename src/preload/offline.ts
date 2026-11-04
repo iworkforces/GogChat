@@ -113,9 +113,17 @@ export const handleCheckOnline = (): string => {
   return attemptId;
 };
 
+function cancelOnlineCheck(): void {
+  const attemptId = currentAttemptId;
+  if (attemptId === null) return;
+  clearOfflineCheck();
+  ipcRenderer.send(IPC_CHANNELS.CHECK_IF_ONLINE, { operation: 'cancel', attemptId });
+}
+
 export function installOffline(): void {
   window.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('app:checkIfOnline', handleCheckOnline);
+    window.addEventListener('app:cancelOnlineCheck', cancelOnlineCheck);
 
     if (window.gogchat?.onOnlineStatus) {
       unsubscribe = window.gogchat.onOnlineStatus(handleOnlineStatus);
@@ -136,6 +144,7 @@ export function installOffline(): void {
 
   window.addEventListener('beforeunload', () => {
     window.removeEventListener('app:checkIfOnline', handleCheckOnline);
+    window.removeEventListener('app:cancelOnlineCheck', cancelOnlineCheck);
     clearOfflineCheck();
 
     if (unsubscribe) {

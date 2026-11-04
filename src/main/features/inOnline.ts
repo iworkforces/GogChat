@@ -413,6 +413,13 @@ export default (_window?: BrowserWindow) => {
       if (!('reply' in event)) {
         return;
       }
+      if (data.operation === 'cancel') {
+        const current = activeProbes.get(event.sender.id);
+        if (current?.sender === event.sender && current.attemptId === data.attemptId) {
+          abortActiveProbe(event.sender.id);
+        }
+        return;
+      }
       startSenderProbe(data.attemptId, event);
     },
   });

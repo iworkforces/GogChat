@@ -104,4 +104,35 @@ describe('inOnline defineIPC pipeline', () => {
     expect(event.reply).toHaveBeenCalledTimes(1);
     feature.cleanupConnectivityHandler();
   });
+
+  it('validates cancellation through the real IPC pipeline and aborts without a reply', async () => {
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: { signal?: AbortSignal }) => {
+        signal = init?.signal;
+        return new Promise((_resolve, reject) =>
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            {
+              once: true,
+            }
+          )
+        );
+      })
+    );
+    const feature = await import('./inOnline.js');
+    feature.default();
+    const event = makeSenderEvent(9);
+    electronMock.ipcMain.emit(IPC_CHANNELS.CHECK_IF_ONLINE, event, { attemptId: 'current' });
+    electronMock.ipcMain.emit(IPC_CHANNELS.CHECK_IF_ONLINE, event, {
+      attemptId: 'current',
+      operation: 'cancel',
+    });
+    expect(signal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(event.reply).not.toHaveBeenCalled();
+    feature.cleanupConnectivityHandler();
+  });
 });
