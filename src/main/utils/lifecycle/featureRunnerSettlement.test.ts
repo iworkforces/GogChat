@@ -53,6 +53,54 @@ afterEach(() => {
 });
 
 describe('featureRunner', () => {
+  it('waits for a sibling before rejecting a blocked required consumer', async () => {
+    const held = Promise.withResolvers<void>();
+    const siblingFinished = vi.fn();
+    const blocked = vi.fn();
+    featurePlan.security = [
+      [
+        {
+          name: 'required-consumer',
+          phase: 'security',
+          required: true,
+          requires: ['failed'],
+          init: blocked,
+        },
+        {
+          name: 'sibling',
+          phase: 'security',
+          init: async () => {
+            await held.promise;
+            siblingFinished();
+          },
+        },
+      ],
+    ];
+    const phase = runner.runPhase('security', context);
+    const observed = expect(phase).rejects.toThrow(/requires successful feature 'failed'/);
+    expect(siblingFinished).not.toHaveBeenCalled();
+    held.resolve();
+    await observed;
+    expect(siblingFinished).toHaveBeenCalledTimes(1);
+    expect(blocked).not.toHaveBeenCalled();
+  });
+
+  it('does not admit a consumer after cleanup overlaps its provider initialization', async () => {
+    const held = Promise.withResolvers<void>();
+    const cleaned = vi.fn();
+    const consumer = vi.fn();
+    featurePlan.security = [
+      [{ name: 'provider', phase: 'security', init: () => held.promise, cleanup: cleaned }],
+      [{ name: 'consumer', phase: 'security', requires: ['provider'], init: consumer }],
+    ];
+    const phase = runner.runPhase('security', context);
+    const cleanup = runner.cleanupAll(context, budget());
+    held.resolve();
+    await Promise.all([phase, cleanup]);
+    expect(cleaned).toHaveBeenCalledTimes(1);
+    expect(consumer).not.toHaveBeenCalled();
+  });
+
   it('cleans a held initializer once when it settles after cleanup starts', async () => {
     const held = Promise.withResolvers<void>();
     const cleaned = vi.fn();

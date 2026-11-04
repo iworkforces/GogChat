@@ -62,6 +62,7 @@ describe('featureRunner platform gating', () => {
       phase: 'deferred',
       required: true,
       platforms: ['darwin'],
+      requires: ['missing'],
       init,
       cleanup,
     };

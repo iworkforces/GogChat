@@ -15,7 +15,16 @@ import ts from 'typescript';
 
 const FEATURE_PHASES = ['security', 'critical', 'ui', 'deferred'];
 const OPERATIONAL_KEYS = new Set(['init', 'cleanup']);
-const KNOWN_METADATA = new Set(['name', 'phase', 'description', 'required', 'dependencies']);
+const KNOWN_METADATA = new Set([
+  'name',
+  'phase',
+  'description',
+  'required',
+  'dependencies',
+  'requires',
+  'platforms',
+]);
+const PLATFORMS = ['darwin', 'win32', 'unsupported'];
 
 export function parseSpecSource(source, fileName = 'spec.ts') {
   const sourceFile = ts.createSourceFile(
@@ -157,12 +166,11 @@ function extractFeatureEntry(objectLiteral, fileName, index) {
         result.required = requireBooleanLiteral(property.initializer, fileName, index, 'required');
         break;
       case 'dependencies':
-        result.dependencies = requireStringArray(
-          property.initializer,
-          fileName,
-          index,
-          'dependencies'
-        );
+      case 'requires':
+        result[key] = requireStringArray(property.initializer, fileName, index, key);
+        break;
+      case 'platforms':
+        result.platforms = requirePlatformArray(property.initializer, fileName, index);
         break;
       default:
         break;
@@ -233,6 +241,30 @@ function requireStringArray(node, fileName, index, property) {
     items.push(element.text);
   }
   return items;
+}
+
+function requirePlatformArray(node, fileName, index) {
+  const value = unwrapExpression(node);
+  if (!ts.isArrayLiteralExpression(value)) {
+    throw specError(fileName, index, 'platforms', 'expected an array of platform names');
+  }
+  return value.elements.map((raw) => {
+    const element = unwrapExpression(raw);
+    let name;
+    if (ts.isStringLiteral(element) || ts.isNoSubstitutionTemplateLiteral(element)) {
+      name = element.text;
+    } else if (
+      ts.isPropertyAccessExpression(element) &&
+      ts.isIdentifier(element.expression) &&
+      element.expression.text === 'SUPPORTED_PLATFORM_NAMES'
+    ) {
+      name = { macOS: 'darwin', windows: 'win32' }[element.name.text];
+    }
+    if (!PLATFORMS.includes(name)) {
+      throw specError(fileName, index, 'platforms', 'expected a supported static platform name');
+    }
+    return name;
+  });
 }
 
 function specError(fileName, index, property, message) {
