@@ -111,6 +111,8 @@ describe('app section', () => {
       [
         ...Object.keys(expectedBooleanDefaults),
         'accountLabels',
+        'retainedAccountIndices',
+        'accountNotificationMuteUntil',
         'updateSnoozedUntil',
         'sessionMaintenanceMode',
       ].sort()
@@ -159,6 +161,8 @@ describe('app update snooze and session maintenance settings', () => {
     const store = openStore();
     expect(store.get('app.updateSnoozedUntil')).toBe(0);
     expect(store.get('app.sessionMaintenanceMode')).toBe('default');
+    expect(store.get('app.retainedAccountIndices')).toEqual([0]);
+    expect(store.get('app.accountNotificationMuteUntil')).toEqual({});
   });
 
   it('fills both defaults for an older app object without resetting other preferences', () => {
@@ -171,6 +175,22 @@ describe('app update snooze and session maintenance settings', () => {
     expect(store.get('app.startHidden')).toBe(true);
     expect(store.get('app.updateSnoozedUntil')).toBe(0);
     expect(store.get('app.sessionMaintenanceMode')).toBe('default');
+  });
+
+  it('retains sparse membership across store reopening', () => {
+    const store = openStore();
+    store.set('app.retainedAccountIndices', [0, 2, 7]);
+    expect(openStore().get('app.retainedAccountIndices')).toEqual([0, 2, 7]);
+  });
+
+  it('preserves unrelated preferences when legacy mute entries are malformed', () => {
+    writeFileSync(
+      path.join(cwd, 'config.json'),
+      JSON.stringify({ app: { startHidden: true, accountNotificationMuteUntil: { '2': 'bad' } } })
+    );
+    const store = openStore();
+    expect(store.get('app.startHidden')).toBe(true);
+    expect(store.get('app.accountNotificationMuteUntil')).toEqual({ '2': 'bad' });
   });
 
   it.each([0, 1, 1_900_000_000_000, Number.MAX_SAFE_INTEGER])('accepts snooze deadline %s', (v) => {
