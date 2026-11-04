@@ -67,6 +67,7 @@ import { installHeaderFix } from '../security/cspHeaderHandler.js';
 import { getWindowDefaults } from '../platform/windowUtils.js';
 import { logger } from '../lifecycle/logger.js';
 import { asType, asUnsafe } from '../../../shared/typeUtils.js';
+import { AccountForgetter, retainAccount } from './retainedAccounts.js';
 import { createAccountWebPreferences } from './accountWebPreferences.js';
 import {
   notifyAccountWebContentsCreated,
@@ -110,6 +111,7 @@ interface AccountViewEntry {
  * transparently with either backend.
  */
 export class AccountViewManager implements IAccountWindowManager {
+  private readonly forgetter = new AccountForgetter();
   private hostWindow: BrowserWindow | null = null;
   private readonly views = new Map<AccountIndex, AccountViewEntry>();
   private readonly webContentsToAccountIndex = new Map<WebContentsId, AccountIndex>();
@@ -285,6 +287,7 @@ export class AccountViewManager implements IAccountWindowManager {
    * view's webContents should use {@link getAccountWebContents}.
    */
   createAccountWindow(url: string, accountIndex: AccountIndex): BrowserWindow {
+    this.forgetter.assertAvailable(accountIndex);
     if (!this.isolated) {
       this.startMaintenance();
     }
@@ -366,6 +369,12 @@ export class AccountViewManager implements IAccountWindowManager {
       `[AccountViewManager] Created view for account ${accountIndex} (partition=${partition})`
     );
 
+    try {
+      retainAccount(accountIndex);
+    } catch (error: unknown) {
+      this.unregisterAccount(accountIndex);
+      throw error;
+    }
     this.emitWebContentsCreated(accountIndex, view.webContents);
 
     return host;
@@ -423,6 +432,7 @@ export class AccountViewManager implements IAccountWindowManager {
    * preferred over keeping a sorted z-order list.
    */
   private switchToAccount(accountIndex: AccountIndex): void {
+    this.forgetter.assertAvailable(accountIndex);
     const target = this.views.get(accountIndex);
     if (!target) return;
     this.applyResourceTransition({ visible: accountIndex });
@@ -539,6 +549,10 @@ export class AccountViewManager implements IAccountWindowManager {
   }
 
   unregisterAccount(accountIndex: AccountIndex): void {
+    this.removeAccount(accountIndex, false);
+  }
+
+  private removeAccount(accountIndex: AccountIndex, disposed: boolean): void {
     const entry = this.views.get(accountIndex);
     if (!entry) return;
     const wasVisible = entry.resourceState === 'visible';
@@ -554,7 +568,7 @@ export class AccountViewManager implements IAccountWindowManager {
       _clearBootstrap(accountIndex);
       notifyAccountRemoved(accountIndex);
     }
-    if (this.hostWindow && !this.hostWindow.isDestroyed()) {
+    if (!disposed && this.hostWindow && !this.hostWindow.isDestroyed()) {
       try {
         this.hostWindow.contentView.removeChildView(entry.view);
       } catch {
@@ -565,7 +579,7 @@ export class AccountViewManager implements IAccountWindowManager {
       // WebContentsView does not expose a direct destroy(); destroying its
       // webContents releases the renderer process for that account.
       const wc = entry.view.webContents;
-      if (!wc.isDestroyed()) {
+      if (!disposed && !wc.isDestroyed()) {
         wc.close();
       }
     } catch {
@@ -589,6 +603,17 @@ export class AccountViewManager implements IAccountWindowManager {
       this.applyResourceTransition({ visible: this.mostRecentAccountIndex });
     }
     log.info(`[AccountViewManager] Unregistered account ${accountIndex}`);
+  }
+
+  forgetAccount(accountIndex: AccountIndex): Promise<void> {
+    return this.forgetter.forget(accountIndex, this.isBootstrap(accountIndex), () => {
+      const entry = this.views.get(accountIndex);
+      if (entry && this.hostWindow && !this.hostWindow.isDestroyed()) {
+        this.hostWindow.contentView.removeChildView(entry.view);
+      }
+      if (entry && !entry.view.webContents.isDestroyed()) entry.view.webContents.close();
+      this.removeAccount(accountIndex, true);
+    });
   }
 
   getAccountCount(): number {
@@ -697,6 +722,7 @@ export class AccountViewManager implements IAccountWindowManager {
    * Works from visible or hidden-live; no-op if already parked.
    */
   dehydrateAccount(accountIndex: AccountIndex): void {
+    this.forgetter.assertAvailable(accountIndex);
     const entry = this.views.get(accountIndex);
     if (!entry) return;
     if (this.isBootstrap(accountIndex)) return;
@@ -750,6 +776,7 @@ export class AccountViewManager implements IAccountWindowManager {
    * Unthrottle is owned by {@link switchToAccount} (visible ⇒ unthrottled).
    */
   hydrateAccount(accountIndex: AccountIndex): BrowserWindow | null {
+    this.forgetter.assertAvailable(accountIndex);
     const entry = this.views.get(accountIndex);
     if (!entry) return null;
     if (entry.resourceState !== 'visible') {

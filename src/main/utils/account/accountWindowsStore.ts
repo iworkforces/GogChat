@@ -147,7 +147,7 @@ export function updateAccountWindows(
   accountWindowsWriteQueue = run.catch((error: unknown) => {
     log.error('[AccountWindows] Failed to persist account window state:', sanitizeLogError(error));
   });
-  return accountWindowsWriteQueue;
+  return run;
 }
 
 export function flushAccountWindowsWrites(): Promise<void> {
@@ -244,6 +244,14 @@ export function persistAccountWindowState(
     ...current,
     [accountIndex]: snapshot,
   }));
+}
+
+export function deleteAccountWindowState(accountIndex: AccountIndex): Promise<void> {
+  return updateAccountWindows((current) => {
+    const next = { ...current };
+    delete next[accountIndex];
+    return next;
+  });
 }
 
 /**
@@ -481,6 +489,7 @@ export function accountWindowApi(): {
   bounds: (window: BrowserWindow) => AccountWindowState | null;
   capture: (window: BrowserWindow) => CapturedAccountWindow;
   persist: (accountIndex: AccountIndex, state: unknown) => Promise<void>;
+  remove: (accountIndex: AccountIndex) => Promise<void>;
   flush: () => Promise<void>;
   detach: () => void;
   reset: () => Promise<void>;
@@ -494,6 +503,7 @@ export function accountWindowApi(): {
     bounds: readNormalBounds,
     capture: captureAccountWindowSnapshot,
     persist: persistAccountWindowState,
+    remove: deleteAccountWindowState,
     flush: flushAccountWindowsWrites,
     detach: detachAllAccountWindowListeners,
     reset: resetAccountWindowsStoreForTests,

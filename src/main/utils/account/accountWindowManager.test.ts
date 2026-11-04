@@ -177,6 +177,8 @@ const h = vi.hoisted(() => {
     bootstrapSet,
     trackedTimers,
     recordActivity: vi.fn(),
+    clearStorageData: vi.fn(async () => undefined),
+    clearCache: vi.fn(async () => undefined),
   };
 });
 
@@ -191,6 +193,12 @@ vi.mock('electron', () => {
   return {
     app: { getAppPath: vi.fn(() => '/mock/app/path') },
     BrowserWindow: h.MockBW,
+    session: {
+      fromPartition: vi.fn(() => ({
+        clearStorageData: h.clearStorageData,
+        clearCache: h.clearCache,
+      })),
+    },
   };
 });
 
@@ -385,6 +393,90 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('AccountWindowManager — construction', () => {
+  it('retries disposal of the same window before clearing a retained account', async () => {
+    const manager = new AccountWindowManager(makeFactory());
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(0));
+    const window = manager.createAccountWindow('https://chat.google.com', index);
+    const mockWindow = asType<MockBWInstance>(window);
+    const removed = vi.fn();
+    const unsubscribe = accountHooks.onAccountRemoved(removed);
+    mockWindow.destroy.mockImplementationOnce(() => {
+      throw new Error('destroy failed');
+    });
+    h.clearStorageData.mockImplementationOnce(async () => {
+      expect(mockWindow.destroyed).toBe(true);
+    });
+
+    await expect(manager.forgetAccount(index)).rejects.toThrow('destroy failed');
+    expect(h.clearStorageData).not.toHaveBeenCalled();
+    expect(h.clearCache).not.toHaveBeenCalled();
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 7]);
+
+    await manager.forgetAccount(index);
+    expect(mockWindow.destroy).toHaveBeenCalledTimes(2);
+    expect(manager.getAccountWindow(index)).toBeNull();
+    expect(manager.getAccountForWebContents(asWebContentsId(mockWindow.webContents.id))).toBeNull();
+    expect(manager.hasAccount(index)).toBe(false);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0]);
+    expect(removed).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    manager.destroyAll();
+  });
+
+  it('removes queued geometry and identity only after storage clears, and retries a metadata failure', async () => {
+    const { configSet } = await import('../../config.js');
+    const manager = new AccountWindowManager(makeFactory());
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(0));
+    manager.createAccountWindow('https://chat.google.com', index);
+    h.mockStore['app.accountLabels'] = { '0': 'Work', '7': 'Client' };
+    manager.saveAccountWindowState(index);
+    await flushAccountWindowsWrites();
+    vi.mocked(configSet).mockImplementationOnce(() => {
+      throw new Error('disk failed');
+    });
+    await expect(manager.forgetAccount(index)).rejects.toThrow('disk failed');
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 7]);
+    await manager.forgetAccount(index);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0]);
+    expect(h.mockStore['app.accountLabels']).toEqual({ '0': 'Work' });
+    expect(manager.getAccountWindowState(index)).toBeNull();
+    manager.destroyAll();
+  });
+
+  it('refuses to forget primary and bootstrap accounts', async () => {
+    const manager = new AccountWindowManager(makeFactory());
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(0));
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(2));
+    manager.markAsBootstrap(asAccountIndex(2));
+    await expect(manager.forgetAccount(asAccountIndex(0))).rejects.toThrow();
+    await expect(manager.forgetAccount(asAccountIndex(2))).rejects.toThrow();
+    expect(h.clearStorageData).not.toHaveBeenCalled();
+    manager.destroyAll();
+  });
+  it('forgets a dehydrated sparse account, blocks reopening during clearing, and retries failures', async () => {
+    const manager = new AccountWindowManager(makeFactory());
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(0));
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(2));
+    manager.createAccountWindow('https://chat.google.com', index);
+    manager.dehydrateAccount(index);
+    h.clearStorageData.mockRejectedValueOnce(new Error('storage failed'));
+    const first = manager.forgetAccount(index);
+    expect(manager.forgetAccount(index)).toBe(first);
+    expect(() => manager.createAccountWindow('https://chat.google.com', index)).toThrow();
+    expect(() => manager.hydrateAccount(index)).toThrow();
+    await expect(first).rejects.toThrow('storage failed');
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2, 7]);
+    await manager.forgetAccount(index);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2]);
+    expect(h.clearCache).toHaveBeenCalledOnce();
+    manager.createAccountWindow('https://chat.google.com', index);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2, 7]);
+    manager.destroyAll();
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2, 7]);
+  });
   it('clears the shared bootstrap tracker on construction', () => {
     h.bootstrapSet.add(7);
     new AccountWindowManager();

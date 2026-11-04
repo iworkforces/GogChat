@@ -44,7 +44,7 @@ function makeReplyEvent(id: number) {
 
 type OnlineIpcConfig = {
   handler: (
-    data: { attemptId: string },
+    data: { attemptId: string; operation?: 'check' | 'cancel' },
     event: { reply?: ReturnType<typeof vi.fn>; sender?: ReturnType<typeof makeSender> }
   ) => void;
   validator: (data: unknown) => unknown;
@@ -763,6 +763,39 @@ describe('inOnline feature', () => {
     afterEach(() => {
       vi.useRealTimers();
       vi.unstubAllGlobals();
+    });
+
+    it('cancels only the matching sender and attempt, including a coalesced start', async () => {
+      vi.useFakeTimers();
+      const { pending, fetchMock } = stubPendingFetch();
+      const feature = await import('./inOnline.js');
+      feature.default();
+      const first = makeReplyEvent(101);
+      const second = makeReplyEvent(102);
+      const cfg = getOnlineIpc();
+      cfg.handler({ attemptId: 'first' }, first);
+      cfg.handler({ attemptId: 'other' }, second);
+      cfg.handler({ operation: 'cancel', attemptId: 'other' }, first);
+      expect(pending[0]?.aborted).toBe(false);
+      expect(pending[1]?.aborted).toBe(false);
+      cfg.handler({ operation: 'cancel', attemptId: 'first' }, first);
+      expect(pending[0]?.aborted).toBe(true);
+      cfg.handler({ attemptId: 'queued' }, first);
+      cfg.handler({ operation: 'cancel', attemptId: 'first' }, first);
+      cfg.handler({ operation: 'cancel', attemptId: 'queued' }, first);
+      await vi.advanceTimersByTimeAsync(feature.ONLINE_FETCH_MIN_INTERVAL_MS);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(first.reply).not.toHaveBeenCalled();
+      pending[1]?.resolve({ ok: true });
+      await vi.waitFor(() =>
+        expect(second.reply).toHaveBeenCalledWith('onlineStatus', {
+          attemptId: 'other',
+          outcome: 'online',
+        })
+      );
+      cfg.handler({ operation: 'cancel', attemptId: 'other' }, second);
+      expect(second.reply).toHaveBeenCalledTimes(1);
+      feature.cleanupConnectivityHandler();
     });
 
     it('lets a fast second probe reply and drops the slow first result', async () => {

@@ -1,5 +1,5 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from 'electron';
-import { Menu, clipboard } from 'electron';
+import { BrowserWindow as ElectronBrowserWindow, Menu, clipboard, dialog } from 'electron';
 import log from 'electron-log';
 import store, { configGet, configSet } from '../config.js';
 import environment from '../../environment.js';
@@ -27,6 +27,66 @@ import {
 } from '../utils/account/accountNavigation.js';
 import { formatAccountNotificationLabel } from '../utils/platform/accountNotificationIdentity.js';
 import type { AccountIndex } from '../../shared/types/branded.js';
+import { listRetainedAccountIndices } from '../utils/account/retainedAccounts.js';
+import { isAccountNotificationMuted } from '../utils/platform/accountNotificationMute.js';
+import { onAccountWebContentsCreated } from '../utils/account/accountWebContentsHooks.js';
+import { onBootstrapStateChanged } from '../utils/account/bootstrapTracker.js';
+import { registerCleanupTask } from '../utils/lifecycle/resourceCleanup.js';
+
+const forgettingAccounts = new Set<AccountIndex>();
+
+function selectedAccount(window: BrowserWindow): AccountIndex | null {
+  const manager = getAccountWindowManager();
+  return manager.getAccountIndex(ElectronBrowserWindow.getFocusedWindow() ?? window);
+}
+
+function setAccountMute(window: BrowserWindow, muted: boolean): void {
+  try {
+    const index = selectedAccount(window);
+    if (index === null) return;
+    const deadlines = { ...configGet('app.accountNotificationMuteUntil') };
+    if (muted) deadlines[String(index)] = Date.now() + 60 * 60 * 1000;
+    else delete deadlines[String(index)];
+    configSet('app.accountNotificationMuteUntil', deadlines);
+    setAppMenu(window);
+  } catch (error: unknown) {
+    log.error('[AppMenu] Failed to update account notification mute:', sanitizeLogError(error));
+  }
+}
+
+async function forgetAccount(window: BrowserWindow, index: AccountIndex): Promise<void> {
+  const manager = getAccountWindowManager();
+  if (
+    index === 0 ||
+    manager.isBootstrap(index) ||
+    !listRetainedAccountIndices().includes(index) ||
+    forgettingAccounts.has(index)
+  )
+    return;
+  forgettingAccounts.add(index);
+  try {
+    const { response } = await dialog.showMessageBox(window, {
+      type: 'warning',
+      buttons: ['Cancel', 'Forget Account'],
+      defaultId: 0,
+      cancelId: 0,
+      message: `Forget ${formatAccountNotificationLabel(index)}?`,
+      detail: 'Local account storage will be removed. This cannot be undone.',
+    });
+    if (response !== 1) return;
+    await manager.forgetAccount(index);
+    setAppMenu(window);
+  } catch (error: unknown) {
+    log.error('[AppMenu] Failed to forget account:', sanitizeLogError(error));
+    await dialog.showMessageBox(window, {
+      type: 'error',
+      message: 'Could not forget account',
+      detail: 'Some local data may already have been cleared. You can try again.',
+    });
+  } finally {
+    forgettingAccounts.delete(index);
+  }
+}
 
 function menuAccountIndex(window: BrowserWindow): AccountIndex {
   try {
@@ -103,6 +163,12 @@ function buildAccountLabelsSubmenu(
 
 let menuWindow: BrowserWindow | null = null;
 
+function refreshApplicationMenu(): void {
+  if (menuWindow && !menuWindow.isDestroyed()) {
+    setAppMenu(menuWindow);
+  }
+}
+
 function runUpdateSnoozeAction(
   id: 'snoozeUpdatePrompts' | 'resumeUpdatePrompts',
   window: BrowserWindow
@@ -122,10 +188,24 @@ function selectSessionMaintenanceMode(mode: SessionMaintenanceMode, window: Brow
 }
 
 function setAppMenu(window: BrowserWindow): void {
+  if (!menuWindow) {
+    // Subscribe before assigning the window: creation-hook backfill needs no refresh.
+    // Rebuild on lifecycle changes, before opening; native menus cannot add items live.
+    const offCreated = onAccountWebContentsCreated(refreshApplicationMenu);
+    const offBootstrap = onBootstrapStateChanged(refreshApplicationMenu);
+    registerCleanupTask('appMenu-account-lifecycle', () => {
+      offCreated();
+      offBootstrap();
+      menuWindow = null;
+    });
+  }
   menuWindow = window;
   const autoLaunchSupported = supports.autoLaunch();
   const updatesSnoozed = (configGet('app.updateSnoozedUntil') ?? 0) > Date.now();
   const maintenanceMode = configGet('app.sessionMaintenanceMode') ?? 'default';
+  const selected = selectedAccount(window);
+  const muted = selected !== null && isAccountNotificationMuted(selected);
+  const manager = getAccountWindowManager();
   const menuItems = Menu.buildFromTemplate([
     {
       label: 'File',
@@ -152,6 +232,18 @@ function setAppMenu(window: BrowserWindow): void {
             const manager = getAccountWindowManager();
             loadAccountURL(manager, menuAccountIndex(window), environment.logoutUrl);
           },
+        },
+        {
+          label: 'Forget Account',
+          submenu: listRetainedAccountIndices()
+            .filter((index) => index !== 0)
+            .map((index) => ({
+              label: formatAccountNotificationLabel(index),
+              enabled: !manager.isBootstrap(index) && !forgettingAccounts.has(index),
+              click: () => {
+                void forgetAccount(window, index);
+              },
+            })),
         },
         {
           type: 'separator',
@@ -256,6 +348,7 @@ function setAppMenu(window: BrowserWindow): void {
     },
     {
       label: 'Preferences',
+      id: 'preferences',
       submenu: [
         {
           label: 'Auto check for Updates',
@@ -341,6 +434,18 @@ function setAppMenu(window: BrowserWindow): void {
           },
         },
         {
+          id: 'mute-account-notifications',
+          label: 'Mute Chat Notifications for One Hour',
+          enabled: selected !== null && !muted,
+          click: () => setAccountMute(window, true),
+        },
+        {
+          id: 'resume-account-notifications',
+          label: 'Resume Chat Notifications',
+          enabled: selected !== null && muted,
+          click: () => setAccountMute(window, false),
+        },
+        {
           label: 'Session Maintenance',
           submenu: [
             {
@@ -373,16 +478,21 @@ function setAppMenu(window: BrowserWindow): void {
     buildHelpSubMenu(window),
   ]);
 
+  const preferences = menuItems.getMenuItemById('preferences')?.submenu;
+  preferences?.on('menu-will-show', () => {
+    const index = selectedAccount(window);
+    const isMuted = index !== null && isAccountNotificationMuted(index);
+    const mute = menuItems.getMenuItemById('mute-account-notifications');
+    const resume = menuItems.getMenuItemById('resume-account-notifications');
+    if (mute) mute.enabled = index !== null && !isMuted;
+    if (resume) resume.enabled = index !== null && isMuted;
+  });
   Menu.setApplicationMenu(menuItems);
 }
 
 registerMenuAction('refreshApplicationMenu', {
   label: 'Refresh Application Menu',
-  handler: () => {
-    if (menuWindow && !menuWindow.isDestroyed()) {
-      setAppMenu(menuWindow);
-    }
-  },
+  handler: refreshApplicationMenu,
 });
 
 export default setAppMenu;

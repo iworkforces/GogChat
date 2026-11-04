@@ -52,8 +52,10 @@ export interface FeatureSpec {
   readonly phase: FeaturePriority;
   /** Whether failure is fatal (true) or merely logged (false). Defaults to false. */
   readonly required?: boolean;
-  /** Names of features that must be initialized first */
+  /** Names of features that must be attempted first, regardless of success. */
   readonly dependencies?: readonly string[];
+  /** Names of features that must initialize successfully before this feature. */
+  readonly requires?: readonly string[];
   /** Platforms where this feature is allowed to initialize. Defaults to all platforms. */
   readonly platforms?: readonly PlatformName[];
   /** Optional human-readable description for logs */

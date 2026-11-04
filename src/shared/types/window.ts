@@ -118,6 +118,7 @@ export interface IAccountWindowManager {
    */
   isAccountVisible(accountIndex: AccountIndex): boolean;
   unregisterAccount(accountIndex: AccountIndex): void;
+  forgetAccount(accountIndex: AccountIndex): Promise<void>;
   getAccountCount(): number;
   destroyAll(): void;
   createAccountWindow(url: string, accountIndex: AccountIndex): Electron.BrowserWindow;

@@ -1,11 +1,10 @@
 import type { StoreType, StoreKeyPaths } from '../shared/types/config.js';
 import Store from 'electron-store';
-import { addCacheLayer, isCachedStore, type CachedStore } from './utils/config/configCache.js';
+import type { CachedStore } from './utils/config/configCache.js';
 import log from 'electron-log';
 import { getPackageInfo } from './utils/platform/packageInfo.js';
 import { getOrCreateEncryptionKey } from './utils/security/encryptionKey.js';
 
-import { schema, CACHE_VERSION } from './utils/config/configSchema.js';
 import { ConfigError } from './utils/lifecycle/errors.js';
 import { asType, asUnsafe } from '../shared/typeUtils.js';
 
@@ -31,6 +30,7 @@ export async function initializeStore(): Promise<Store<StoreType> | CachedStore<
     return storeInstance;
   }
 
+  const { schema, CACHE_VERSION } = await import('./utils/config/configSchema.js');
   const { recoverRekey, rekeyConfigStore } = await import('./utils/config/rekeyConfigStore.js');
   try {
     recoverRekey();
@@ -73,11 +73,12 @@ export async function initializeStore(): Promise<Store<StoreType> | CachedStore<
    */
   // Only enable cache layer if not in test environment
   if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') {
+    const { addCacheLayer } = await import('./utils/config/configCache.js');
     store = addCacheLayer(store);
   }
 
   // ⚡ OPTIMIZATION: Check and update cache version
-  validateAndUpdateCacheVersion(store);
+  await validateAndUpdateCacheVersion(store, CACHE_VERSION);
 
   storeInstance = store;
   return store;
@@ -87,7 +88,11 @@ export async function initializeStore(): Promise<Store<StoreType> | CachedStore<
  * Validate cache version and clear if outdated
  * ⚡ OPTIMIZATION: Prevents stale data after app updates
  */
-function validateAndUpdateCacheVersion(store: Store<StoreType> | CachedStore<StoreType>): void {
+async function validateAndUpdateCacheVersion(
+  store: Store<StoreType> | CachedStore<StoreType>,
+  cacheVersion: string
+): Promise<void> {
+  const { isCachedStore } = await import('./utils/config/configCache.js');
   try {
     const meta = store.get('_meta');
     const currentAppVersion = getPackageInfo().version;
@@ -95,12 +100,12 @@ function validateAndUpdateCacheVersion(store: Store<StoreType> | CachedStore<Sto
     const storedAppVersion = meta?.lastAppVersion;
 
     // Check if cache version or app version changed
-    const cacheVersionChanged = storedCacheVersion !== CACHE_VERSION;
+    const cacheVersionChanged = storedCacheVersion !== cacheVersion;
     const appVersionChanged = storedAppVersion !== currentAppVersion;
 
     if (cacheVersionChanged || appVersionChanged) {
       log.info(
-        `[Config] Cache invalidation triggered - Cache version: ${storedCacheVersion} → ${CACHE_VERSION}, App version: ${storedAppVersion} → ${currentAppVersion}`
+        `[Config] Cache invalidation triggered - Cache version: ${storedCacheVersion} → ${cacheVersion}, App version: ${storedAppVersion} → ${currentAppVersion}`
       );
 
       // Clear cache if store has caching layer
@@ -111,7 +116,7 @@ function validateAndUpdateCacheVersion(store: Store<StoreType> | CachedStore<Sto
 
       // Update metadata
       store.set('_meta', {
-        cacheVersion: CACHE_VERSION,
+        cacheVersion,
         lastAppVersion: currentAppVersion,
         lastUpdated: Date.now(),
       });
@@ -119,7 +124,7 @@ function validateAndUpdateCacheVersion(store: Store<StoreType> | CachedStore<Sto
       log.info('[Config] Cache version and metadata updated');
     } else {
       log.debug(
-        `[Config] Cache version valid (${CACHE_VERSION}), app version: ${currentAppVersion}`
+        `[Config] Cache version valid (${cacheVersion}), app version: ${currentAppVersion}`
       );
     }
   } catch (error: unknown) {

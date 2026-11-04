@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
 
   const accountWindowManager = {
     markAsBootstrap: vi.fn(),
+    createAccountWindow: vi.fn<(url: string, index: number) => void>(),
     getAccountWebContents: vi.fn(() => account0Wc),
     hostWebContents: hostOnlyWc,
   };
@@ -64,12 +65,13 @@ const mocks = vi.hoisted(() => {
     registerGlobalCleanups: vi.fn(async () => {
       order.push('global-cleanups');
     }),
-    runPhase: vi.fn(async (phase: string) => {
+    runPhase: vi.fn(async (phase: string, _context?: unknown) => {
       order.push(`phase:${phase}`);
     }),
     initializeStore: vi.fn(async () => {
       order.push('store-init');
     }),
+    listRetainedAccountIndices: vi.fn((): number[] => [0]),
     prepareAccountWindows: vi.fn(async () => {
       order.push('prepare-account-windows');
     }),
@@ -133,6 +135,9 @@ vi.mock('../config.js', () => ({
 }));
 vi.mock('../utils/account/accountWindowPersistenceBridge.js', () => ({
   prepareAccountWindows: mocks.prepareAccountWindows,
+}));
+vi.mock('../utils/account/retainedAccounts.js', () => ({
+  listRetainedAccountIndices: mocks.listRetainedAccountIndices,
 }));
 vi.mock('../utils/account/cacheWarmer.js', () => ({
   warmInitialIcons: mocks.warmInitialIcons,
@@ -237,6 +242,7 @@ describe('registerAppReady characterization', () => {
       mocks.order.push('deferred-phase');
     });
     mocks.account0Wc.isDestroyed.mockReturnValue(false);
+    mocks.listRetainedAccountIndices.mockReturnValue([0]);
     mocks.accountWindowManager.getAccountWebContents.mockReturnValue(mocks.account0Wc);
     mocks.app.isPackaged = true;
     delete process.env['GOGCHAT_DISABLE_PRECONNECT'];
@@ -280,6 +286,60 @@ describe('registerAppReady characterization', () => {
     );
     expect(mocks.accountWindowManager.markAsBootstrap).toHaveBeenCalledWith(asAccountIndex(0));
     expect(mocks.armPerformanceFinalizer).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores sparse retained accounts after primary bootstrap without replacing its context', async () => {
+    mocks.listRetainedAccountIndices.mockReturnValue([0, 2, 7]);
+    mocks.accountWindowManager.createAccountWindow.mockImplementation(() => {
+      expect(mocks.accountWindowManager.markAsBootstrap).toHaveBeenCalledWith(asAccountIndex(0));
+      expect(mocks.didFinishLoadListeners).toHaveLength(1);
+    });
+    await runReady();
+    await vi.waitFor(() => expect(mocks.runPhase).toHaveBeenCalledWith('ui', expect.anything()));
+
+    expect(mocks.createAccountWindow).toHaveBeenCalledTimes(1);
+    expect(mocks.accountWindowManager.createAccountWindow.mock.calls).toEqual([
+      ['https://mail.google.com/chat/u/0', 2],
+      ['https://mail.google.com/chat/u/0', 7],
+    ]);
+    const context = mocks.runPhase.mock.calls.find(([phase]) => phase === 'ui')?.[1];
+    expect(context).toMatchObject({
+      mainWindow: mocks.mainWindow,
+      accountWindowManager: mocks.accountWindowManager,
+    });
+    expect(mocks.armPerformanceFinalizer).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps primary startup and other retained accounts usable when one restore fails', async () => {
+    mocks.listRetainedAccountIndices.mockReturnValue([0, 2, 7]);
+    mocks.accountWindowManager.createAccountWindow.mockImplementationOnce(() => {
+      throw makeSecretError();
+    });
+    await runReady();
+    await vi.waitFor(() => expect(mocks.runPhase).toHaveBeenCalledWith('ui', expect.anything()));
+
+    expect(mocks.accountWindowManager.createAccountWindow).toHaveBeenLastCalledWith(
+      'https://mail.google.com/chat/u/0',
+      asAccountIndex(7)
+    );
+    expect(mocks.app.quit).not.toHaveBeenCalled();
+    expect(log.error).toHaveBeenCalledWith(
+      '[Main] Failed to restore retained account:',
+      2,
+      expect.objectContaining({ message: '[redacted]' })
+    );
+    expectNoSentinels(spiesOf(log));
+  });
+
+  it('does not restore retained accounts when shutdown closes admission after bootstrap', async () => {
+    mocks.listRetainedAccountIndices.mockImplementationOnce(() => {
+      closeStartupAdmission();
+      return [0, 2, 7];
+    });
+    await runReady();
+    await vi.waitFor(() => expect(mocks.listRetainedAccountIndices).toHaveBeenCalled());
+    expect(mocks.accountWindowManager.createAccountWindow).not.toHaveBeenCalled();
+    expect(mocks.runPhase).not.toHaveBeenCalledWith('ui', expect.anything());
   });
 
   it('attaches load markers to account WebContents, not a WCV host, and treats hard fail-load as non-terminal', async () => {

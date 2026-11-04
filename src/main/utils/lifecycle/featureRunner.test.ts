@@ -294,6 +294,61 @@ describe('featureRunner', () => {
   // ── Per-spec error isolation ────────────────────────────────────────────────
 
   describe('runPhase — error handling', () => {
+    it('admits successful cross-phase prerequisites and blocks transitive optional consumers', async () => {
+      const started: string[] = [];
+      const cleaned = vi.fn();
+      const plan: Plan = {
+        ...emptyPlan(),
+        security: [[makeSpec({ name: 'provider', phase: 'security' })]],
+        ui: [
+          [
+            makeSpec({
+              name: 'success',
+              phase: 'ui',
+              requires: ['provider'],
+              init: () => {
+                started.push('success');
+              },
+            }),
+            makeSpec({
+              name: 'failed',
+              phase: 'ui',
+              init: () => {
+                throw new Error('failed');
+              },
+            }),
+          ],
+          [
+            makeSpec({
+              name: 'blocked',
+              phase: 'ui',
+              requires: ['failed'],
+              init: () => {
+                started.push('blocked');
+              },
+              cleanup: cleaned,
+            }),
+          ],
+          [
+            makeSpec({
+              name: 'transitive',
+              phase: 'ui',
+              requires: ['blocked'],
+              init: () => {
+                started.push('transitive');
+              },
+              cleanup: cleaned,
+            }),
+          ],
+        ],
+      };
+      const runner = await loadRunnerWithPlan(plan);
+      await runner.runAllPhases({});
+      await runner.cleanupAll({}, new globalThis.AbortController().signal);
+      expect(started).toEqual(['success']);
+      expect(cleaned).not.toHaveBeenCalled();
+    });
+
     it('isolates failure of optional spec from same-batch peers', async () => {
       const peerInit = vi.fn();
       const failing = makeSpec({

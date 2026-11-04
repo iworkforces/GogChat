@@ -4,6 +4,7 @@
   const status = window.document.getElementById('retry-status');
   const MAX_AUTO_ATTEMPT_COUNT = 100;
   let automaticAttemptCount = 0;
+  let pending = false;
 
   const describeFailure = (detail: unknown): string => {
     const outcome: unknown =
@@ -34,14 +35,16 @@
   };
 
   const restoreRetryState = (event: Event) => {
+    pending = false;
     btn.disabled = false;
     btn.innerText = 'Retry';
     showFeedback(describeFailure('detail' in event ? event.detail : null));
   };
 
   const checkIsOnline = () => {
-    btn.disabled = true;
-    btn.innerText = 'Checking...';
+    pending = true;
+    btn.disabled = false;
+    btn.innerText = 'Cancel';
     showFeedback('');
 
     // This script does not have access to Electron APIs (IPC)
@@ -53,8 +56,18 @@
   // reloading the offline document.
   window.addEventListener('app:onlineCheckFailed', restoreRetryState);
 
-  btn.addEventListener('click', checkIsOnline);
+  btn.addEventListener('click', () => {
+    if (!pending) {
+      checkIsOnline();
+      return;
+    }
+    pending = false;
+    btn.innerText = 'Retry';
+    showFeedback('Connectivity check cancelled.');
+    window.dispatchEvent(new Event('app:cancelOnlineCheck'));
+  });
   const interval = window.setInterval(() => {
+    if (pending) return;
     checkIsOnline();
     automaticAttemptCount++;
     if (automaticAttemptCount === MAX_AUTO_ATTEMPT_COUNT) {

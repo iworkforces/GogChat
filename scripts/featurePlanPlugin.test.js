@@ -10,7 +10,7 @@
  *      batching, cycle detection, and atomic write safety.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -159,7 +159,7 @@ describe('parseSpecSource – AST-based parser', () => {
     expect(entries[1].dependencies).toEqual(['a']);
   });
 
-  it('ignores platform metadata while preserving dependency metadata', () => {
+  it('extracts platform metadata while preserving dependency metadata', () => {
     const src = `
       export const PLATFORM_FEATURES = [
         { name: 'mac-only', phase: 'deferred', platforms: ['darwin'], init: () => {} },
@@ -168,8 +168,8 @@ describe('parseSpecSource – AST-based parser', () => {
     `;
     const { entries } = parseSpecSource(src, 'platform.spec.ts');
     expect(entries).toEqual([
-      { name: 'mac-only', phase: 'deferred' },
-      { name: 'after', phase: 'deferred', dependencies: ['mac-only'] },
+      { name: 'mac-only', phase: 'deferred', platforms: ['darwin'] },
+      { name: 'after', phase: 'deferred', dependencies: ['mac-only'], platforms: ['win32'] },
     ]);
   });
 
@@ -192,6 +192,124 @@ describe('parseSpecSource – AST-based parser', () => {
     `;
     const { entries } = parseSpecSource(src, 'string-keys.spec.ts');
     expect(entries).toEqual([{ name: 'quoted', phase: 'ui', description: 'string keys' }]);
+  });
+});
+
+describe('hard prerequisite planning', () => {
+  it('executes a generated cross-file plan with runtime prerequisite admission', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gogchat-plan-runtime-'));
+    try {
+      const specs = path.join(tmp, 'src/main/initializers');
+      fs.mkdirSync(specs, { recursive: true });
+      const provider = `export const A = [{ name: 'provider', phase: 'security', init: () => { throw new Error('failed'); } }];`;
+      const consumers = `export const B = [
+        { name: 'blocked', phase: 'ui', requires: ['provider'], init: () => {} },
+        { name: 'ordered', phase: 'ui', dependencies: ['provider'], init: () => {} }
+      ];`;
+      for (const [name, source] of [
+        ['a', provider],
+        ['b', consumers],
+      ]) {
+        fs.writeFileSync(path.join(specs, `${name}.spec.ts`), source);
+        fs.writeFileSync(path.join(specs, `${name}.spec.js`), source);
+      }
+      const { outputPath } = await generateFeaturePlan({ projectRoot: tmp });
+      expect((await generateFeaturePlan({ projectRoot: tmp })).changed).toBe(false);
+      const generated = await import(/* @vite-ignore */ outputPath);
+      vi.resetModules();
+      vi.doMock('../src/main/generated/featurePlan.js', () => generated);
+      vi.doMock('electron-log', () => ({
+        default: { info() {}, warn() {}, debug() {}, error() {} },
+      }));
+      vi.doMock('../src/main/utils/lifecycle/performanceMonitor.js', () => ({
+        perfMonitor: { mark() {} },
+      }));
+      vi.doMock('../src/main/utils/platform/platformDetection.js', () => ({
+        platform: { name: 'darwin' },
+      }));
+      const runner = await import('../src/main/utils/lifecycle/featureRunner.js');
+      await runner.runAllPhases({});
+      expect(runner._getInitializedForTest().map((spec) => spec.name)).toEqual(['ordered']);
+    } finally {
+      vi.doUnmock('../src/main/generated/featurePlan.js');
+      vi.doUnmock('electron-log');
+      vi.doUnmock('../src/main/utils/lifecycle/performanceMonitor.js');
+      vi.doUnmock('../src/main/utils/platform/platformDetection.js');
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('parses static platform forms and batches cross-file mixed edges', async () => {
+    const { plan, allEntries } = await buildPlanFromSources([
+      {
+        file: 'a.spec.ts',
+        source: `export const A = [
+        { name: 'provider', phase: 'ui', platforms: [SUPPORTED_PLATFORM_NAMES.macOS, 'win32', 'unsupported'] },
+        { name: 'ordered', phase: 'ui', dependencies: ['provider'] }
+      ];`,
+      },
+      {
+        file: 'b.spec.ts',
+        source: `export const B = [
+        { name: 'consumer', phase: 'ui', requires: ['ordered', 'provider'], platforms: [SUPPORTED_PLATFORM_NAMES.windows] }
+      ];`,
+      },
+    ]);
+    expect(plan.ui).toEqual([['provider'], ['ordered'], ['consumer']]);
+    expect(allEntries[0].platforms).toEqual(['darwin', 'win32', 'unsupported']);
+    expect(allEntries[2].requires).toEqual(['ordered', 'provider']);
+  });
+
+  it.each([
+    ['requires: [unknown]', 'requires'],
+    ['platforms: ["linux"]', 'platforms'],
+    ['platforms: [SUPPORTED_PLATFORM_NAMES.linux]', 'platforms'],
+    ['platforms: [...other]', 'platforms'],
+    ['platforms: getPlatforms()', 'platforms'],
+  ])('rejects non-static or invalid metadata %s with source context', (metadata, property) => {
+    expect(() =>
+      parseSpecSource(`export const X = [{name: 'x', phase: 'ui', ${metadata}}]`, 'bad.spec.ts')
+    ).toThrow(new RegExp(`bad\\.spec\\.ts\\[0\\]\\.${property}`));
+  });
+
+  it.each([
+    ["requires: ['missing']", "name: 'other', phase: 'ui'", /unknown feature 'missing'/],
+    ["requires: ['other']", "name: 'other', phase: 'deferred'", /later-phase/],
+    [
+      "requires: ['other']",
+      "name: 'other', phase: 'ui', dependencies: ['consumer']",
+      /Circular dependency/,
+    ],
+    ["requires: ['other']", "name: 'other', phase: 'ui', platforms: ['darwin']", /platforms/],
+  ])('rejects invalid cross-file prerequisites', async (metadata, provider, error) => {
+    await expect(
+      buildPlanFromSources([
+        {
+          file: 'consumer.spec.ts',
+          source: `export const A = [{name: 'consumer', phase: 'ui', ${metadata}}]`,
+        },
+        { file: 'provider.spec.ts', source: `export const B = [{${provider}}]` },
+      ])
+    ).rejects.toThrow(error);
+  });
+
+  it('rejects a transitive cross-file platform mismatch', async () => {
+    await expect(
+      buildPlanFromSources([
+        {
+          file: 'a.spec.ts',
+          source: `export const A = [{name: 'provider', phase: 'security', platforms: ['darwin']}]`,
+        },
+        {
+          file: 'b.spec.ts',
+          source: `export const B = [{name: 'middle', phase: 'ui', requires: ['provider'], platforms: ['darwin', 'win32']}]`,
+        },
+        {
+          file: 'c.spec.ts',
+          source: `export const C = [{name: 'consumer', phase: 'deferred', requires: ['middle'], platforms: ['win32']}]`,
+        },
+      ])
+    ).rejects.toThrow(/b\.spec\.ts\[0\]\.requires.*platforms/);
   });
 });
 
@@ -477,6 +595,14 @@ describe('generateFeaturePlan – atomic write', () => {
 
       await expect(generateFeaturePlan({ projectRoot: tmp, write: true })).rejects.toThrow(
         /bad\.spec\.ts\[0\]/
+      );
+      expect(fs.readFileSync(outputPath, 'utf-8')).toBe(sentinel);
+      fs.writeFileSync(
+        path.join(specsDir, 'bad.spec.ts'),
+        `export const BAD = [{ name: 'consumer', phase: 'ui', requires: ['missing'] }];\n`
+      );
+      await expect(generateFeaturePlan({ projectRoot: tmp, write: true })).rejects.toThrow(
+        /bad\.spec\.ts\[0\]\.requires/
       );
       expect(fs.readFileSync(outputPath, 'utf-8')).toBe(sentinel);
     } finally {

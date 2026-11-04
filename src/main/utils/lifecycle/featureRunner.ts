@@ -22,6 +22,7 @@ const PHASES: readonly FeaturePriority[] = ['security', 'critical', 'ui', 'defer
 
 /** Features that have been initialized, in completion order, for reverse-order cleanup. */
 const initialized: FeatureSpec[] = [];
+const successful = new Set<string>();
 const pending = new Set<Promise<void>>();
 let cleanupAvailable = true;
 
@@ -122,11 +123,20 @@ async function runFeature(spec: FeatureSpec, context: FeatureContext): Promise<v
     return;
   }
 
+  const missing = spec.requires?.find((name) => !successful.has(name));
+  if (missing !== undefined) {
+    const error = new Error(`Feature '${spec.name}' requires successful feature '${missing}'`);
+    if (spec.required) throw error;
+    log.warn(`[FeatureRunner] Optional feature blocked by prerequisite:`, error);
+    return;
+  }
+
   const start = Date.now();
   const settlement = Promise.withResolvers<void>();
   pending.add(settlement.promise);
   try {
     await spec.init(context);
+    successful.add(spec.name);
     initialized.push(spec);
     log.info(
       `[FeatureRunner] ✓ ${featureName} (${Date.now() - start}ms)${spec.description ? ` — ${spec.description}` : ''}`

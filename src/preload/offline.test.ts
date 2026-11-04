@@ -228,7 +228,7 @@ describe('preload offline recovery', () => {
     const sent = vi
       .mocked(ipcRenderer.send)
       .mock.calls.find((call) => call[0] === IPC_CHANNELS.CHECK_IF_ONLINE);
-    const attemptId = (sent?.[1] as { attemptId: string }).attemptId;
+    const attemptId = (sent?.[1] as { attemptId: string } | undefined)?.attemptId ?? '';
 
     statusListener?.({}, { attemptId: 'stale', outcome: 'network-error' });
     expect(failedEventCount).toBe(0);
@@ -240,6 +240,29 @@ describe('preload offline recovery', () => {
       IPC_CHANNELS.ONLINE_STATUS,
       expect.any(Function)
     );
+  });
+
+  it('invalidates a cancelled attempt before IPC and ignores its deadline and replies', async () => {
+    vi.useFakeTimers();
+    const { ipcRenderer } = await import('electron');
+    const { IPC_CHANNELS } = await import('../shared/constants.js');
+    delete (window as { gogchat?: unknown }).gogchat;
+    installOffline();
+    window.dispatchEvent(new Event('DOMContentLoaded'));
+    const attemptId = handleCheckOnline();
+    vi.mocked(ipcRenderer.send).mockImplementationOnce(() => {
+      handleOnlineStatus({ attemptId, outcome: 'online' });
+    });
+    window.dispatchEvent(new Event('app:cancelOnlineCheck'));
+    expect(ipcRenderer.send).toHaveBeenLastCalledWith(IPC_CHANNELS.CHECK_IF_ONLINE, {
+      operation: 'cancel',
+      attemptId,
+    });
+    handleOnlineStatus({ attemptId, outcome: 'network-error' });
+    vi.advanceTimersByTime(ONLINE_CHECK_DEADLINE_MS);
+    expect(locationReplace).not.toHaveBeenCalled();
+    expect(failedEventCount).toBe(0);
+    window.dispatchEvent(new Event('beforeunload'));
   });
 
   it.each([

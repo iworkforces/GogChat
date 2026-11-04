@@ -294,6 +294,23 @@ test.describe('built CJS preload entry', () => {
         ).toEqual([localUrl, localUrl]);
       };
 
+      const cancelledAttemptId = await checkOnline();
+      await page.evaluate(() => window.dispatchEvent(new Event('app:cancelOnlineCheck')));
+      requestCount += 1;
+      const cancellations = await recordedIpc(runtime, {
+        channel: IPC_CHANNELS.CHECK_IF_ONLINE,
+        count: requestCount,
+      });
+      expect(
+        validateOnlineCheckRequest(
+          cancellations.filter((item) => item.channel === IPC_CHANNELS.CHECK_IF_ONLINE)[
+            requestCount - 1
+          ]?.data
+        )
+      ).toEqual({ operation: 'cancel', attemptId: cancelledAttemptId });
+      await reply(cancelledAttemptId, 'online');
+      await retainedDocument('cancelled-late-success', 0);
+
       const deadlineSupersededAttemptId = await checkOnline();
       const expiredAttemptId = await checkOnline();
       await reply(deadlineSupersededAttemptId, 'online');

@@ -31,10 +31,17 @@ describe('offline page recovery UI', () => {
 
   it('stops automatic checks at exactly 100 dispatches', () => {
     const dispatch = vi.spyOn(window, 'dispatchEvent');
-    vi.advanceTimersByTime(100 * 60_000);
-    expect(dispatch).toHaveBeenCalledTimes(100);
+    for (let i = 0; i < 100; i++) {
+      vi.advanceTimersByTime(60_000);
+      fail();
+    }
+    expect(
+      dispatch.mock.calls.filter(([event]) => event.type === 'app:checkIfOnline')
+    ).toHaveLength(100);
     vi.advanceTimersByTime(10 * 60_000);
-    expect(dispatch).toHaveBeenCalledTimes(100);
+    expect(
+      dispatch.mock.calls.filter(([event]) => event.type === 'app:checkIfOnline')
+    ).toHaveLength(100);
     dispatch.mockRestore();
   });
 
@@ -43,6 +50,7 @@ describe('offline page recovery UI', () => {
     for (let i = 0; i < 100; i++) {
       window.dispatchEvent(new Event('app:onlineCheckFailed'));
       btn.click();
+      fail();
       vi.advanceTimersByTime(60_000);
     }
     expect(
@@ -52,23 +60,26 @@ describe('offline page recovery UI', () => {
   });
 
   it('allows a manual check after the automatic budget is exhausted', () => {
-    vi.advanceTimersByTime(110 * 60_000);
+    for (let i = 0; i < 100; i++) {
+      vi.advanceTimersByTime(60_000);
+      fail();
+    }
     window.dispatchEvent(new Event('app:onlineCheckFailed'));
     const dispatch = vi.spyOn(window, 'dispatchEvent');
     btn.click();
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(btn.disabled).toBe(true);
-    expect(btn.innerText).toBe('Checking...');
+    expect(btn.disabled).toBe(false);
+    expect(btn.innerText).toBe('Cancel');
     window.dispatchEvent(new Event('app:onlineCheckFailed'));
     expect(btn.disabled).toBe(false);
     expect(btn.innerText).toBe('Retry');
     dispatch.mockRestore();
   });
 
-  it('disables button while checking and re-enables on app:onlineCheckFailed', () => {
+  it('offers cancellation while checking and restores retry on failure', () => {
     btn.click();
-    expect(btn.disabled).toBe(true);
-    expect(btn.innerText).toBe('Checking...');
+    expect(btn.disabled).toBe(false);
+    expect(btn.innerText).toBe('Cancel');
 
     window.dispatchEvent(new Event('app:onlineCheckFailed'));
     expect(btn.disabled).toBe(false);
@@ -87,7 +98,7 @@ describe('offline page recovery UI', () => {
   it('restores retry after multiple failed checks', () => {
     for (let i = 0; i < 3; i++) {
       btn.click();
-      expect(btn.disabled).toBe(true);
+      expect(btn.innerText).toBe('Cancel');
       window.dispatchEvent(new Event('app:onlineCheckFailed'));
       expect(btn.disabled).toBe(false);
       expect(btn.innerText).toBe('Retry');
@@ -147,13 +158,13 @@ describe('offline page recovery UI', () => {
     expect(status.textContent).not.toBe('');
     btn.click();
     expect(status.textContent).toBe('');
-    expect(btn.disabled).toBe(true);
+    expect(btn.innerText).toBe('Cancel');
 
     fail({ outcome: 'network-error' });
     expect(status.textContent).not.toBe('');
     vi.advanceTimersByTime(60_000);
     expect(status.textContent).toBe('');
-    expect(btn.innerText).toBe('Checking...');
+    expect(btn.innerText).toBe('Cancel');
   });
 
   it('keeps the same document and controls through a failure', () => {
@@ -171,9 +182,30 @@ describe('offline page recovery UI', () => {
     vi.resetModules();
     await import('./index.js');
     btn.click();
-    expect(btn.disabled).toBe(true);
+    expect(btn.innerText).toBe('Cancel');
     fail({ outcome: 'timeout' });
     expect(btn.disabled).toBe(false);
     expect(btn.innerText).toBe('Retry');
+  });
+
+  it('cancels only on a click, not on an automatic tick during a pending check', () => {
+    const dispatch = vi.spyOn(window, 'dispatchEvent');
+    const marker = document.body.appendChild(document.createElement('i'));
+    btn.click();
+    vi.advanceTimersByTime(60_000);
+    expect(
+      dispatch.mock.calls.filter(([event]) => event.type === 'app:checkIfOnline')
+    ).toHaveLength(1);
+    expect(
+      dispatch.mock.calls.filter(([event]) => event.type === 'app:cancelOnlineCheck')
+    ).toHaveLength(0);
+    btn.click();
+    expect(
+      dispatch.mock.calls.filter(([event]) => event.type === 'app:cancelOnlineCheck')
+    ).toHaveLength(1);
+    expect(btn.innerText).toBe('Retry');
+    expect(btn.disabled).toBe(false);
+    expect(status.textContent).not.toBe('');
+    expect(marker.isConnected).toBe(true);
   });
 });

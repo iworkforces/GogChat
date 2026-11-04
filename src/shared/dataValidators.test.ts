@@ -529,6 +529,23 @@ describe('validateOnlineCheckRequest', () => {
     expect(() => validateOnlineCheckRequest(undefined)).toThrow('must be a plain object');
     expect(() => validateOnlineCheckRequest({ online: true })).toThrow('must be a string');
   });
+
+  it('preserves valid cancellation and rejects malformed operations and tokens', () => {
+    expect(validateOnlineCheckRequest({ operation: 'cancel', attemptId: 'a1' })).toEqual({
+      operation: 'cancel',
+      attemptId: 'a1',
+    });
+    expect(validateOnlineCheckRequest({ operation: 'check', attemptId: 'a1' })).toEqual({
+      operation: 'check',
+      attemptId: 'a1',
+    });
+    for (const operation of ['invalid', null, 1]) {
+      expect(() => validateOnlineCheckRequest({ operation, attemptId: 'a1' })).toThrow();
+    }
+    for (const attemptId of ['', '  ', 'a'.repeat(129)]) {
+      expect(() => validateOnlineCheckRequest({ operation: 'cancel', attemptId })).toThrow();
+    }
+  });
 });
 
 describe('validateOnlineStatusData', () => {

@@ -42,6 +42,10 @@ export interface AppConfig {
    * `Account N` (1-based). Max length enforced when writing.
    */
   accountLabels: Record<string, string>;
+  /** Retained account indices, independent of saved window geometry. */
+  retainedAccountIndices: number[];
+  /** Absolute wall-clock mute deadlines, keyed by account index. */
+  accountNotificationMuteUntil: Record<string, number>;
   /**
    * Hidden experimental flag — when true, the app uses a single host
    * BrowserWindow with one WebContentsView per account (Electron 30+ API)

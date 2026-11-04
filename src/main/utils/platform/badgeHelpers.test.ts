@@ -447,6 +447,22 @@ describe('badgeHelpers (config wiring)', () => {
       );
     });
 
+    it('updates the badge even when shared admission suppresses an unread banner', async () => {
+      mockConfigGet.mockImplementation((key: string) => key === 'app.unreadDeltaNotifications');
+      mockShowNativeNotification.mockReturnValue(false);
+      const { setupBadgeHandlers } = await import('./badgeHelpers.js');
+      setupBadgeHandlers(fakeWindow());
+      const unread = capturedHandler<number>('unreadCount');
+      unread(1, eventForAccount(7));
+      unread(4, eventForAccount(7));
+      expect(mockSetBadgeCount).toHaveBeenLastCalledWith(4);
+      expect(mockShowNativeNotification).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ source: 'unread-delta', accountIndex: 7 })
+      );
+      mockShowNativeNotification.mockReturnValue(true);
+    });
+
     it('sums per-account unread for dock badge and caps display at 99', async () => {
       mockResolveAccount.mockReturnValueOnce(0).mockReturnValueOnce(1);
       const { setupBadgeHandlers, sumAccountUnreadCounts, updateBadgeIcon } =

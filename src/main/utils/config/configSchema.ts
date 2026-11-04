@@ -100,6 +100,16 @@ export const schema: Schema<StoreType> = {
         },
         default: {},
       },
+      retainedAccountIndices: {
+        type: 'array',
+        items: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        uniqueItems: true,
+        default: [0],
+      },
+      accountNotificationMuteUntil: {
+        type: 'object',
+        default: {},
+      },
       useWebContentsView: {
         type: 'boolean',
         default: false,
@@ -117,6 +127,8 @@ export const schema: Schema<StoreType> = {
       notificationPermissionRequested: false,
       unreadDeltaNotifications: false,
       accountLabels: {},
+      retainedAccountIndices: [0],
+      accountNotificationMuteUntil: {},
       useWebContentsView: false,
     },
   },
