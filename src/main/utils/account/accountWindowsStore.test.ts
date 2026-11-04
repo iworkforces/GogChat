@@ -49,6 +49,7 @@ import {
   captureAccountWindowSnapshot,
   captureWatchedAccountWindows,
   detachAllAccountWindowListeners,
+  deleteAccountWindowState,
   factoryAccountWindowState,
   flushAccountWindowsWrites,
   migrateLegacyWindowToAccountZero,
@@ -137,6 +138,13 @@ afterEach(async () => {
 });
 
 describe('accountWindowsStore validation', () => {
+  it('serializes deletion after an older account geometry save', async () => {
+    const index = asAccountIndex(7);
+    const saved = persistAccountWindowState(index, valid(1, 2));
+    const deleted = deleteAccountWindowState(index);
+    await Promise.all([saved, deleted]);
+    expect(readAccountWindowState(index)).toBeNull();
+  });
   it('uses the schema factory defaults', () => {
     const windowDefault = asType<{
       bounds: { x: number | null; y: number | null; width: number; height: number };
@@ -300,7 +308,7 @@ describe('accountWindowsStore writes', () => {
     });
     const first = persistAccountWindowState(asAccountIndex(0), valid(1, 2, 500, 600));
     const second = persistAccountWindowState(asAccountIndex(2), valid(8, 9, 510, 610));
-    await first;
+    await expect(first).rejects.toThrow('disk full');
     await second;
     expect(log.error).toHaveBeenCalledWith(
       '[AccountWindows] Failed to persist account window state:',

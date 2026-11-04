@@ -29,6 +29,7 @@ interface AccountWindowApi {
   bounds: (window: BrowserWindow) => AccountWindowState | null;
   capture: (window: BrowserWindow) => CapturedAccountWindow;
   persist: (accountIndex: AccountIndex, state: unknown) => Promise<void>;
+  remove: (accountIndex: AccountIndex) => Promise<void>;
   flush: () => Promise<void>;
   detach: () => void;
   reset: () => Promise<void>;
@@ -129,6 +130,12 @@ export function flushAccountWindowPersistence(): Promise<void> {
     const loaded = await loadApi();
     await loaded.flush();
   });
+}
+
+export async function deleteAccountWindowPersistence(accountIndex: AccountIndex): Promise<void> {
+  await tail;
+  const loaded = await loadApi();
+  await loaded.remove(accountIndex);
 }
 
 export function detachAccountWindowListeners(): void {

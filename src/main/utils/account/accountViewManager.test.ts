@@ -209,6 +209,8 @@ const h = vi.hoisted(() => {
     mockStore,
     bootstrapSet,
     activityTracker,
+    clearStorageData: vi.fn(async () => undefined),
+    clearCache: vi.fn(async () => undefined),
   };
 });
 
@@ -223,6 +225,12 @@ vi.mock('electron', () => {
     },
     BrowserWindow: h.MockBW,
     WebContentsView: h.MockWebContentsView,
+    session: {
+      fromPartition: vi.fn(() => ({
+        clearStorageData: h.clearStorageData,
+        clearCache: h.clearCache,
+      })),
+    },
   };
 });
 
@@ -388,6 +396,48 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('AccountViewManager — construction', () => {
+  it('clears only the live secondary partition and rejects primary and bootstrap accounts', async () => {
+    const { session } = await import('electron');
+    const manager = new AccountViewManager();
+    const primary = asAccountIndex(0);
+    const second = asAccountIndex(2);
+    const other = asAccountIndex(7);
+    manager.createAccountWindow('https://chat.google.com', primary);
+    manager.createAccountWindow('https://chat.google.com', second);
+    manager.createAccountWindow('https://chat.google.com', other);
+    manager.markAsBootstrap(second);
+    await expect(manager.forgetAccount(primary)).rejects.toThrow();
+    await expect(manager.forgetAccount(second)).rejects.toThrow();
+    const view = viewOf(manager, 7);
+    await manager.forgetAccount(other);
+    expect(session.fromPartition).toHaveBeenCalledOnce();
+    expect(session.fromPartition).toHaveBeenCalledWith('persist:account-7');
+    expect(view.webContents.isDestroyed()).toBe(true);
+    expect(manager.hasAccount(second)).toBe(true);
+    expect(manager.isAccountVisible(primary)).toBe(true);
+    manager.destroyAll();
+  });
+  it('forgets a parked view with fallback and retains membership after a cache failure', async () => {
+    const manager = new AccountViewManager();
+    const index = asAccountIndex(7);
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(0));
+    manager.createAccountWindow('https://chat.google.com', asAccountIndex(2));
+    manager.createAccountWindow('https://chat.google.com', index);
+    const view = viewOf(manager, 7);
+    manager.dehydrateAccount(index);
+    h.clearCache.mockRejectedValueOnce(new Error('cache failed'));
+    const first = manager.forgetAccount(index);
+    expect(manager.forgetAccount(index)).toBe(first);
+    expect(() => manager.hydrateAccount(index)).toThrow();
+    await expect(first).rejects.toThrow('cache failed');
+    expect(view.webContents.isDestroyed()).toBe(true);
+    expect(manager.isAccountVisible(asAccountIndex(0))).toBe(true);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2, 7]);
+    await manager.forgetAccount(index);
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2]);
+    manager.destroyAll();
+    expect(h.mockStore['app.retainedAccountIndices']).toEqual([0, 2]);
+  });
   it('clears the shared bootstrap tracker on construction', () => {
     h.bootstrapSet.add(99);
     new AccountViewManager();

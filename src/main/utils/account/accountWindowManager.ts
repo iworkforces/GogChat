@@ -23,6 +23,7 @@ import type {
 import type { AccountIndex, WebContentsId } from '../../../shared/types/branded.js';
 import { asWebContentsId, toPartition } from '../../../shared/types/branded.js';
 import { asType } from '../../../shared/typeUtils.js';
+import { AccountForgetter, retainAccount } from './retainedAccounts.js';
 import { markAsBootstrap as _markAsBootstrap, clearAllBootstrap } from './bootstrapTracker.js';
 import { bootstrapDelegates } from './accountLifecycleHelpers.js';
 import { AccountWindowRegistry } from './accountWindowRegistry.js';
@@ -96,6 +97,7 @@ export const flushAccountWindowsWrites = flushAccountWindowPersistence;
  * - {@link routeAccountWindow} for window creation routing
  */
 export class AccountWindowManager implements IAccountWindowManager {
+  private readonly forgetter = new AccountForgetter();
   private readonly registry: AccountWindowRegistry;
   private maintenanceStarted = false;
   /**
@@ -211,6 +213,7 @@ export class AccountWindowManager implements IAccountWindowManager {
   // ─── Registry delegates ──────────────────────────────────────────────────
 
   registerWindow(window: BrowserWindow, accountIndex: AccountIndex): void {
+    this.forgetter.assertAvailable(accountIndex);
     this.detachActivityListeners(window);
     this.registry.registerWindow(window, accountIndex);
     if (!this.isolated) {
@@ -411,6 +414,17 @@ export class AccountWindowManager implements IAccountWindowManager {
     }
   }
 
+  forgetAccount(accountIndex: AccountIndex): Promise<void> {
+    return this.forgetter.forget(accountIndex, this.isBootstrap(accountIndex), () => {
+      const window = this.registry.getAccountWindow(accountIndex);
+      if (window && !window.isDestroyed()) window.destroy();
+      // The synchronous closed handler may already have unregistered the window.
+      if (!window || this.registry.getAccountWindow(accountIndex) === window) {
+        this.unregisterAccount(accountIndex);
+      }
+    });
+  }
+
   hasAccount(accountIndex: AccountIndex): boolean {
     // Dehydrated-parked accounts remain known (matches listAccountIndices / WCV).
     return this.registry.hasAccount(accountIndex) || this.dehydratedAccounts.has(accountIndex);
@@ -469,13 +483,14 @@ export class AccountWindowManager implements IAccountWindowManager {
   // ─── Router delegate ──────────────────────────────────────────────────
 
   createAccountWindow(url: string, accountIndex: AccountIndex): BrowserWindow {
+    this.forgetter.assertAvailable(accountIndex);
     // Pass our own dehydrate/hydrate hooks so the router transparently
     // rehydrates a dehydrated account before navigating (T12/M3).
     const hydrationHook: HydrationHook = {
       isDehydrated: (i) => this.isDehydrated(i),
       hydrate: (i) => this.hydrateAccount(i),
     };
-    return routeAccountWindow(
+    const window = routeAccountWindow(
       this.registry,
       this.windowFactory,
       url,
@@ -485,6 +500,8 @@ export class AccountWindowManager implements IAccountWindowManager {
         this.registerNewlyCreatedWindow(created, createdIndex);
       }
     );
+    retainAccount(accountIndex);
+    return window;
   }
 
   /**
@@ -497,6 +514,7 @@ export class AccountWindowManager implements IAccountWindowManager {
       this.registerWindow(window, accountIndex);
       // Saved bounds before ready-to-show. Hydrate does not use this path.
       applyAccountWindowState(window, accountIndex);
+      retainAccount(accountIndex);
       if (
         window &&
         !window.isDestroyed() &&
@@ -558,6 +576,7 @@ export class AccountWindowManager implements IAccountWindowManager {
   // ─── Window state persistence ────────────────────────────────────────────
 
   saveAccountWindowState(accountIndex: AccountIndex): void {
+    this.forgetter.assertAvailable(accountIndex);
     const live = this.getAccountWindow(accountIndex);
     let state: AccountWindowState;
     if (live && !live.isDestroyed()) {
@@ -590,6 +609,7 @@ export class AccountWindowManager implements IAccountWindowManager {
    * mid-auth Google sign-in flows intact.
    */
   dehydrateAccount(accountIndex: AccountIndex): void {
+    this.forgetter.assertAvailable(accountIndex);
     if (this.dehydratedAccounts.has(accountIndex)) {
       return;
     }
@@ -636,6 +656,7 @@ export class AccountWindowManager implements IAccountWindowManager {
    * is configured — we cannot create a partitioned window without one.
    */
   hydrateAccount(accountIndex: AccountIndex): BrowserWindow | null {
+    this.forgetter.assertAvailable(accountIndex);
     const snapshot = this.dehydratedAccounts.get(accountIndex);
     if (!snapshot) {
       // Already hydrated — return the live window if any.

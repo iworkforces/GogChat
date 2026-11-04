@@ -202,6 +202,17 @@ export function registerAppReady(options: AppReadyOptions): void {
         log.warn('[Main] No account-0 WebContents');
       }
 
+      const { listRetainedAccountIndices } = await import('../utils/account/retainedAccounts.js');
+      for (const index of listRetainedAccountIndices()) {
+        if (!isStartupAdmissionOpen()) return;
+        if (index === 0) continue;
+        try {
+          accountWindowManager.createAccountWindow(environment.appUrl, index);
+        } catch (error: unknown) {
+          log.error('[Main] Failed to restore retained account:', index, sanitizeLogError(error));
+        }
+      }
+
       // ===== UI PHASE =====
       await runPhase('ui', context);
       if (!isStartupAdmissionOpen()) return;

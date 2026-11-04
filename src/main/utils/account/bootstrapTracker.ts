@@ -16,13 +16,33 @@ import type { AccountIndex } from '../../../shared/types/branded.js';
  * Internal set tracking which account indices are currently bootstrap windows.
  */
 const bootstrapAccounts = new Set<AccountIndex>();
+const stateListeners = new Set<() => void>();
+
+export function onBootstrapStateChanged(listener: () => void): () => void {
+  stateListeners.add(listener);
+  return () => {
+    stateListeners.delete(listener);
+  };
+}
+
+function notifyBootstrapStateChanged(): void {
+  for (const listener of stateListeners) {
+    try {
+      listener();
+    } catch {
+      log.error('[BootstrapTracker] State listener failed');
+    }
+  }
+}
 
 /**
  * Mark an account index as a bootstrap (pre-auth) window.
  * @param accountIndex - The account index to mark
  */
 export function markAsBootstrap(accountIndex: AccountIndex): void {
+  const wasBootstrap = bootstrapAccounts.has(accountIndex);
   bootstrapAccounts.add(accountIndex);
+  if (!wasBootstrap) notifyBootstrapStateChanged();
   log.debug(`[BootstrapTracker] Account ${accountIndex} marked as bootstrap window`);
 }
 
@@ -44,6 +64,7 @@ export function isBootstrap(accountIndex: AccountIndex): boolean {
 export function promoteBootstrap(accountIndex: AccountIndex): boolean {
   const wasBootstrap = bootstrapAccounts.delete(accountIndex);
   if (wasBootstrap) {
+    notifyBootstrapStateChanged();
     log.info(`[BootstrapTracker] Account ${accountIndex} promoted from bootstrap to authenticated`);
   }
   return wasBootstrap;
@@ -55,7 +76,7 @@ export function promoteBootstrap(accountIndex: AccountIndex): boolean {
  * @param accountIndex - The account index to clear
  */
 export function clearBootstrap(accountIndex: AccountIndex): void {
-  bootstrapAccounts.delete(accountIndex);
+  if (bootstrapAccounts.delete(accountIndex)) notifyBootstrapStateChanged();
   log.debug(`[BootstrapTracker] Bootstrap flag cleared for account ${accountIndex}`);
 }
 
