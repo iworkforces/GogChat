@@ -1,13 +1,13 @@
 {
   "name": "gogchat",
   "productName": "GogChat",
-  "version": "4.4.7",
+  "version": "4.4.8",
   "description": "GogChat is an unofficial macOS desktop wrapper for Google Chat, built with Electron and TypeScript.",
   "private": true,
   "repository": "https://github.com/iworkforces/GogChat",
   "homepage": "https://github.com/iworkforces/GogChat",
   "author": "iworkforces Engineers",
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.5",
   "type": "module",
   "main": "lib/main/index.js",
   "sideEffects": false,
@@ -67,9 +67,9 @@
     "@typescript-eslint/eslint-plugin": "^8.73.0",
     "@typescript-eslint/parser": "^8.73.0",
     "@typescript/native": "npm:typescript@7.0.2",
-    "@vitest/coverage-v8": "^5.1.0",
-    "@vitest/ui": "^5.1.0",
-    "electron": "^45.3.4",
+    "@vitest/coverage-v8": "^5.1.1",
+    "@vitest/ui": "^5.1.1",
+    "electron": "^45.4.1",
     "electron-builder": "^26.18.0",
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
@@ -80,7 +80,7 @@
     "rimraf": "^6.1.4",
     "sharp": "^0.35.5",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   },
   "dependencies": {
     "auto-launch": "^5.0.6",
